@@ -41,11 +41,11 @@ except ImportError as exc:  # Give a useful GUI-free error when launched directl
 
 
 BAUD_RATE = 2_500_000
-KEEPALIVE_INTERVAL_MS = 500
+KEEPALIVE_INTERVAL_MS = 250
 START_TIMEOUT_MS = 30_000
 MAX_IQ_LSB = 100
 MAX_SPEED_RPM = 20
-RS485_RX_QUIET_MS = 5
+RS485_RX_QUIET_MS = 20
 RS485_TX_WAIT_MAX_MS = 50
 ENCODER_COUNTS_PER_REV = 16_384
 NOMINAL_REDUCTION = 9.0
@@ -174,6 +174,7 @@ class RobotJointApp(tk.Tk):
         self.start_deadline = 0.0
         self.nonzero_iq_active = False
         self.pulse_active = False
+        self.continuous_active = False
         self.pulse_deadline = 0.0
         self.stop_pending = False
         self.stop_attempts = 0
@@ -210,6 +211,9 @@ class RobotJointApp(tk.Tk):
         self.acc_speeds_var = tk.StringVar(value="10,20")
         self.auto_keep_var = tk.BooleanVar(value=False)
         self.keep_status_var = tk.StringVar(value="Keepalive: 关闭")
+        self.keep_sent_count = 0
+        self.keep_busy_retry_count = 0
+        self.keep_forced_count = 0
         self.motion_var = tk.StringVar(value="位置: 等待固件 MOTION 遥测")
         self.angle_var = tk.StringVar(value="电角度/速度: 未知")
         self.pwm_var = tk.StringVar(value="CCR/Clamp: 未知")
@@ -328,7 +332,7 @@ class RobotJointApp(tk.Tk):
 
         self.keep_check = ttk.Checkbutton(
             controls,
-            text="持续运行自动 Keepalive（500ms）",
+            text="持续运行自动 Keepalive（250ms）",
             variable=self.auto_keep_var,
             command=self._update_keepalive_label,
         )
@@ -378,6 +382,16 @@ class RobotJointApp(tk.Tk):
         )
         self.speed_negative_button.grid(row=2, column=3, padx=4)
         ttk.Button(
+            controls,
+            text="持续正向",
+            command=lambda: self.start_continuous_speed(+1),
+        ).grid(row=2, column=5, padx=4)
+        ttk.Button(
+            controls,
+            text="持续反向",
+            command=lambda: self.start_continuous_speed(-1),
+        ).grid(row=2, column=6, padx=4)
+        ttk.Button(
             controls, text="速度归零", command=lambda: self.send_speed(0)
         ).grid(row=2, column=4, padx=4)
         ttk.Button(
@@ -414,7 +428,8 @@ class RobotJointApp(tk.Tk):
         note = (
             "Iq 是转矩命令，不是转速命令。按 10→20→50→100 LSB 逐级测试；"
             "速度测试从 5 motor rpm 开始。定时脉冲/速度测试与 Stage-I 双向探测会自动每 500ms 发送 keep，"
-            "到点自动 stop；MCU 自身 1000ms 命令看门狗仍独立生效。"
+            "到点自动 stop；“持续正向/持续反向”会一直运行直到按停止（长稳验收用），"
+            "同样自动 keep；MCU 自身 1000ms 命令看门狗仍独立生效。"
         )
         ttk.Label(controls, text=note, foreground="#8a4b00").grid(
             row=5, column=0, columnspan=6, pady=(6, 0), sticky="w"
@@ -484,6 +499,9 @@ class RobotJointApp(tk.Tk):
 
         self.serial_port = connection
         self.connected = True
+        self.keep_sent_count = 0
+        self.keep_busy_retry_count = 0
+        self.keep_forced_count = 0
         self.reader_stop.clear()
         self.reader_thread = threading.Thread(
             target=self._reader_loop, name="robot-joint-uart", daemon=True
@@ -503,6 +521,7 @@ class RobotJointApp(tk.Tk):
         self.start_waiting = False
         self.nonzero_iq_active = False
         self.pulse_active = False
+        self.continuous_active = False
         self.stop_pending = False
         self.sequence_active = False
         self._rt_health_fragment = ""
@@ -575,15 +594,16 @@ class RobotJointApp(tk.Tk):
             if (
                 self.mci_state == 0
                 and previous_mci_state not in (None, 0)
-                and self.pulse_active
+                and (self.pulse_active or self.continuous_active)
             ):
                 self.pulse_active = False
+                self.continuous_active = False
                 self.nonzero_iq_active = False
                 self.auto_keep_var.set(False)
                 self._update_keepalive_label()
                 self._append_log(
                     "error",
-                    "MCU 已主动退出 RUN，定时测试和 Keepalive 已停止。\n",
+                    "MCU 已主动退出 RUN，测试和 Keepalive 已停止。\n",
                 )
                 if self.acc_active and self.acc_phase == "speed":
                     self.acc_data[-1]["watchdog"] = True
@@ -835,13 +855,15 @@ class RobotJointApp(tk.Tk):
         else:
             self.eangle_var.set("电角度纹波: 无有效样本")
 
-    def send_command(self, command: str, quiet: bool = False) -> bool:
+    def send_command(self, command: str, quiet: bool = False,
+                     strict_quiet: bool = False) -> bool:
         if not self.connected or self.serial_port is None:
             if not quiet:
                 messagebox.showwarning("未连接", "请先连接串口。")
             return False
         payload = (command.strip() + "\r\n").encode("ascii")
         wait_deadline = time.monotonic() + RS485_TX_WAIT_MAX_MS / 1000.0
+        bus_quiet = False
         while time.monotonic() < wait_deadline:
             receive_quiet = (
                 time.monotonic() - self.last_rx_time
@@ -852,8 +874,14 @@ class RobotJointApp(tk.Tk):
             except (serial.SerialException, OSError):
                 fifo_empty = False
             if receive_quiet and fifo_empty:
+                bus_quiet = True
                 break
             time.sleep(0.001)
+        if strict_quiet and not bus_quiet:
+            # Never transmit into a busy half-duplex bus for keepalive; the
+            # caller retries shortly so the 1000 ms firmware watchdog stays
+            # comfortably refreshed.
+            return False
         try:
             with self.serial_lock:
                 self.serial_port.write(payload)
@@ -939,9 +967,41 @@ class RobotJointApp(tk.Tk):
             self.nonzero_iq_active = value != 0
             if value == 0:
                 self.auto_keep_var.set(False)
+                self.continuous_active = False
             self._update_keepalive_label()
             return True
         return False
+
+    def start_continuous_speed(
+        self,
+        direction: int,
+        value: int | None = None,
+    ) -> None:
+        """Run speed continuously until the user presses stop. Keepalive is
+        refreshed automatically every 300 ms, so the firmware command watchdog
+        never fires; suitable for the >=10 min long-run acceptance."""
+        if value is None:
+            value = self._validated_speed()
+        if value is None:
+            return
+        if self.mci_state != 6:
+            messagebox.showwarning("尚未 RUN", "请先启动，并等待 MCI 进入 RUN。")
+            return
+        if self.pulse_active or self.continuous_active:
+            messagebox.showwarning("测试进行中", "请先停止当前运行。")
+            return
+        command_rpm = direction * value
+        if not self.send_speed(command_rpm):
+            return
+        self.continuous_active = True
+        self.keep_status_var.set(
+            f"持续速度运行: {command_rpm} motor rpm，自动 keep，按停止结束"
+        )
+        self._append_log(
+            "event",
+            f"持续速度运行开始: {command_rpm} motor rpm，自动 keep 250ms；"
+            "按“停止”结束。\n",
+        )
 
     def start_timed_speed(
         self,
@@ -1425,6 +1485,7 @@ class RobotJointApp(tk.Tk):
             self.acc_active = False
             self.sequence_var.set("Stage-I 完整验收: 已中止（手动停止）")
         self.pulse_active = False
+        self.continuous_active = False
         self.nonzero_iq_active = False
         self.auto_keep_var.set(False)
         self._update_keepalive_label()
@@ -1458,22 +1519,59 @@ class RobotJointApp(tk.Tk):
         )
 
     def _keepalive_tick(self) -> None:
-        if (
-            self.connected
-            and (self.auto_keep_var.get() or self.pulse_active)
-            and self.nonzero_iq_active
-        ):
-            self.send_command("keep", quiet=True)
-            if self.pulse_active:
-                remaining_ms = max(
-                    0, int((self.pulse_deadline - time.monotonic()) * 1000)
-                )
-                self.keep_status_var.set(
-                    f"定时测试: 剩余约 {remaining_ms} ms，自动 Keepalive"
-                )
-            else:
-                self.keep_status_var.set("Keepalive: 自动刷新中")
+        try:
+            if (
+                self.connected
+                and (self.auto_keep_var.get() or self.pulse_active
+                     or self.continuous_active)
+                and self.nonzero_iq_active
+            ):
+                if not self.send_command("keep", quiet=True,
+                                         strict_quiet=True):
+                    self.keep_busy_retry_count += 1
+                    self.after(100, self._keepalive_retry)
+                else:
+                    self.keep_sent_count += 1
+                if self.pulse_active:
+                    remaining_ms = max(
+                        0, int((self.pulse_deadline - time.monotonic()) * 1000)
+                    )
+                    self.keep_status_var.set(
+                        f"定时测试: 剩余约 {remaining_ms} ms，自动 Keepalive"
+                    )
+                else:
+                    self.keep_status_var.set(
+                        f"Keepalive: 自动刷新中 "
+                        f"(sent={self.keep_sent_count}, "
+                        f"retry={self.keep_busy_retry_count}, "
+                        f"forced={self.keep_forced_count})"
+                    )
+        except Exception as exc:  # never let the keep chain die silently
+            self._append_log("error", f"Keepalive 异常: {exc}\n")
         self.after(KEEPALIVE_INTERVAL_MS, self._keepalive_tick)
+
+    def _keepalive_retry(self) -> None:
+        try:
+            if not (self.connected and self.nonzero_iq_active):
+                return
+            if self.send_command("keep", quiet=True, strict_quiet=True):
+                self.keep_sent_count += 1
+                return
+            self.keep_busy_retry_count += 1
+            if self.keep_busy_retry_count % 10 == 0:
+                # The bus stayed busy for many retries. Log it but keep
+                # waiting: forcing a half-duplex transmission into an active
+                # burst corrupts both directions and makes things worse.
+                # With a 300 ms keep period the 1000 ms firmware watchdog
+                # still has plenty of margin for a short busy window.
+                self.keep_forced_count += 1
+                self._append_log(
+                    "warn", f"keep 总线持续繁忙 {self.keep_busy_retry_count} "
+                    "次，继续等待静默\n"
+                )
+            self.after(80, self._keepalive_retry)
+        except Exception as exc:
+            self._append_log("error", f"Keepalive 重试异常: {exc}\n")
 
     def _update_keepalive_label(self) -> None:
         if self.auto_keep_var.get() and self.nonzero_iq_active:
