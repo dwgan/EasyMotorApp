@@ -5,3 +5,5 @@ venv/
 build/
 dist/
 *.spec
+logs/
+wave_data/

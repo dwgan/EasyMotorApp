@@ -14,6 +14,9 @@ Telemetry parsed:
   SPEED_TRACE  100 ms trajectory while speed mode is active
   ENC_ERR      rotor AS5047P health counters
   EANG_RIPPLE  12 electrical-angle ripple bins printed after `stop`
+  PWM_TEST     boot/verbose PWM bring-up line (freq/ARR/CCR)
+  ENCODER_RT   boot line advertising rotor-frame and FOC rates
+  WAVE_STREAM  binary ADC phase-current frames while "wave on" is active
 
 Successful `keep` is silent on the firmware side; a rejected `keep` is
 visible.  The MCU remains the final authority for current limits, state
@@ -28,8 +31,10 @@ import re
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from datetime import datetime
 from tkinter import messagebox, ttk
+import os
 
 try:
     import serial
@@ -132,6 +137,15 @@ RT_RE = re.compile(
     r"vq/d=(-?\d+)/(-?\d+) satq/d=(\d+)/(\d+)"
 )
 
+PWM_TEST_RE = re.compile(
+    r"PWM_TEST state=(\d+) err=(\d+) freq=(\d+)Hz arr=(\d+)"
+)
+
+ENCODER_RT_RE = re.compile(
+    r"ENCODER_RT ACTIVE: (\d+)kHz PendSV rotor frame, "
+    r"(\d+)kHz FOC uses latest angle"
+)
+
 ENC_ERR_RE = re.compile(
     r"ENC_ERR spi=(\d+) parity=(\d+) sensor=(\d+) pipeline=(\d+) "
     r"fast_stale=(\d+) health_stale=(\d+) stable_ms=(\d+) agecy=(\d+) "
@@ -147,6 +161,14 @@ EANG_BIN_RE = re.compile(
 
 EANG_BIN_COUNT = 12
 
+WAVE_SOF = 0xA5
+WAVE_FRAME_LEN = 10
+WAVE_STATS_SOF = 0xA6
+WAVE_STATS_FRAME_LEN = 16
+WAVE_END_SEQ = 0xFFFF
+WAVE_BUFFER_MAX = 1500
+WAVE_GLITCH_LSB = 60
+
 
 def format_torque_error(error_code: int) -> str:
     """Decode the TORQUE_CMD error bitmask into readable labels."""
@@ -158,8 +180,8 @@ class RobotJointApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("RobotJointG5 / ICMU150 调试上位机 (Stage-H/I)")
-        self.geometry("1080x780")
-        self.minsize(860, 640)
+        self.geometry("1080x860")
+        self.minsize(900, 700)
 
         self.serial_port: serial.Serial | None = None
         self.serial_lock = threading.Lock()
@@ -208,12 +230,19 @@ class RobotJointApp(tk.Tk):
         self.iq_var = tk.IntVar(value=5)
         self.speed_var = tk.IntVar(value=5)
         self.pulse_duration_var = tk.IntVar(value=5000)
+        self.hold_offset_var = tk.IntVar(value=10)
         self.acc_speeds_var = tk.StringVar(value="10,20")
         self.auto_keep_var = tk.BooleanVar(value=False)
         self.keep_status_var = tk.StringVar(value="Keepalive: 关闭")
         self.keep_sent_count = 0
         self.keep_busy_retry_count = 0
         self.keep_forced_count = 0
+        self.freq_var = tk.StringVar(value="PWM/FOC: 未知")
+        self._freq_pwm_hz: int | None = None
+        self._freq_foc_hz: int | None = None
+        self._freq_enc_rt_hz: int | None = None
+        self._rt_last_t_ms: int | None = None
+        self._rt_last_adc: int | None = None
         self.motion_var = tk.StringVar(value="位置: 等待固件 MOTION 遥测")
         self.angle_var = tk.StringVar(value="电角度/速度: 未知")
         self.pwm_var = tk.StringVar(value="CCR/Clamp: 未知")
@@ -221,10 +250,41 @@ class RobotJointApp(tk.Tk):
         self.health_var = tk.StringVar(value="编码器/实时健康: 未知")
         self.eangle_var = tk.StringVar(value="电角度纹波: 等待停机后 EANG_RIPPLE")
 
+        self.streaming = False
+        self.wave_dec_var = tk.IntVar(value=10)
+        self.wave_u_var = tk.BooleanVar(value=True)
+        self.wave_v_var = tk.BooleanVar(value=True)
+        self.wave_w_var = tk.BooleanVar(value=True)
+        self.wave_stats_var = tk.BooleanVar(value=False)
+        self.wave_scale_var = tk.StringVar(value="自动")
+        self.wave_status_var = tk.StringVar(value="波形: 停止")
+        self._wave_buffers: dict[str, deque] = {
+            "u": deque(maxlen=WAVE_BUFFER_MAX),
+            "v": deque(maxlen=WAVE_BUFFER_MAX),
+            "w": deque(maxlen=WAVE_BUFFER_MAX),
+        }
+        self._wave_stats_entries: deque = deque(maxlen=WAVE_BUFFER_MAX)
+        self._wave_last_seq: int | None = None
+        self._wave_frame_count = 0
+        self._wave_lost_count = 0
+        self._wave_glitch_count = 0
+        self._wave_prev_raw: tuple[int, int, int] | None = None
+        self._wave_off_deadline: float | None = None
+        self.wave_save_var = tk.BooleanVar(value=False)
+        self._wave_csv_file = None
+        self._wave_csv_rows: list[str] = []
+        self._wave_csv_path: str | None = None
+        self.wave_popup: tk.Toplevel | None = None
+        self.wave_popup_canvas: tk.Canvas | None = None
+        self.wave_toggle_button: ttk.Button | None = None
+        self.log_popup: tk.Toplevel | None = None
+        self.log_popup_text: tk.Text | None = None
+
         self._build_ui()
         self.refresh_ports()
         self.after(20, self._process_rx_queue)
         self.after(KEEPALIVE_INTERVAL_MS, self._keepalive_tick)
+        self.after(50, self._wave_redraw)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -273,7 +333,10 @@ class RobotJointApp(tk.Tk):
         ttk.Label(state_frame, textvariable=self.torque_var).grid(
             row=1, column=2, padx=(24, 0), pady=(6, 0), sticky="w"
         )
-        state_frame.columnconfigure(3, weight=1)
+        ttk.Button(
+            state_frame, text="波形窗口", command=self.open_wave_popup
+        ).grid(row=1, column=3, padx=(12, 0), pady=(6, 0), sticky="w")
+        state_frame.columnconfigure(4, weight=1)
 
         motion_frame = ttk.LabelFrame(outer, text="运动与 PWM 遥测", padding=10)
         motion_frame.pack(fill=tk.X, pady=(10, 0))
@@ -294,6 +357,9 @@ class RobotJointApp(tk.Tk):
         )
         ttk.Label(motion_frame, textvariable=self.eangle_var).grid(
             row=5, column=0, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(motion_frame, textvariable=self.freq_var).grid(
+            row=6, column=0, sticky="w", pady=(4, 0)
         )
         motion_frame.columnconfigure(0, weight=1)
 
@@ -425,6 +491,24 @@ class RobotJointApp(tk.Tk):
             row=3, column=4, padx=4, pady=(6, 0)
         )
 
+        ttk.Button(
+            controls, text="固定占空比保持(hold)", command=self.start_scope_hold
+        ).grid(row=6, column=0, padx=4, pady=(6, 0), sticky="ew")
+        ttk.Label(controls, text="偏移(‰ 5..150)").grid(
+            row=6, column=1, padx=(18, 4), pady=(6, 0), sticky="e"
+        )
+        self.hold_offset_spin = ttk.Spinbox(
+            controls,
+            from_=5,
+            to=150,
+            textvariable=self.hold_offset_var,
+            width=6,
+            justify="center",
+        )
+        self.hold_offset_spin.grid(
+            row=6, column=2, padx=4, pady=(6, 0), sticky="w"
+        )
+
         note = (
             "Iq 是转矩命令，不是转速命令。按 10→20→50→100 LSB 逐级测试；"
             "速度测试从 5 motor rpm 开始。定时脉冲/速度测试与 Stage-I 双向探测会自动每 500ms 发送 keep，"
@@ -439,6 +523,15 @@ class RobotJointApp(tk.Tk):
 
         log_frame = ttk.LabelFrame(outer, text="收发日志", padding=6)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        log_tools = ttk.Frame(log_frame)
+        log_tools.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Button(
+            log_tools, text="独立日志窗口", command=self.open_log_popup
+        ).grid(row=0, column=0, padx=(0, 8))
+        ttk.Label(
+            log_tools, text="波形流期间日志与波形并行显示；可导出为文本文件。"
+        ).grid(row=0, column=1, sticky="w")
+        log_tools.columnconfigure(2, weight=1)
         self.log = tk.Text(
             log_frame,
             wrap=tk.NONE,
@@ -453,10 +546,10 @@ class RobotJointApp(tk.Tk):
             log_frame, orient=tk.HORIZONTAL, command=self.log.xview
         )
         self.log.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-        self.log.grid(row=0, column=0, sticky="nsew")
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll.grid(row=1, column=0, sticky="ew")
-        log_frame.rowconfigure(0, weight=1)
+        self.log.grid(row=1, column=0, sticky="nsew")
+        y_scroll.grid(row=1, column=1, sticky="ns")
+        x_scroll.grid(row=2, column=0, sticky="ew")
+        log_frame.rowconfigure(1, weight=1)
         log_frame.columnconfigure(0, weight=1)
 
         self.log.tag_configure("tx", foreground="#76d7ff")
@@ -502,6 +595,12 @@ class RobotJointApp(tk.Tk):
         self.keep_sent_count = 0
         self.keep_busy_retry_count = 0
         self.keep_forced_count = 0
+        self._freq_pwm_hz = None
+        self._freq_foc_hz = None
+        self._freq_enc_rt_hz = None
+        self._rt_last_t_ms = None
+        self._rt_last_adc = None
+        self.freq_var.set("PWM/FOC: 未知")
         self.reader_stop.clear()
         self.reader_thread = threading.Thread(
             target=self._reader_loop, name="robot-joint-uart", daemon=True
@@ -526,6 +625,19 @@ class RobotJointApp(tk.Tk):
         self.sequence_active = False
         self._rt_health_fragment = ""
         self._enc_health_fragment = ""
+        self._freq_pwm_hz = None
+        self._freq_foc_hz = None
+        self._freq_enc_rt_hz = None
+        self._rt_last_t_ms = None
+        self._rt_last_adc = None
+        self.freq_var.set("PWM/FOC: 未知")
+        self.streaming = False
+        self._wave_off_deadline = None
+        self._close_wave_csv()
+        for buf in self._wave_buffers.values():
+            buf.clear()
+        self._wave_stats_entries.clear()
+        self.wave_status_var.set("波形: 停止")
         self.auto_keep_var.set(False)
         if connection is not None:
             try:
@@ -557,12 +669,71 @@ class RobotJointApp(tk.Tk):
                 continue
             self.last_rx_time = time.monotonic()
             pending.extend(chunk)
-            while b"\n" in pending:
-                raw_line, _, pending = pending.partition(b"\n")
-                line = raw_line.rstrip(b"\r").decode("ascii", errors="replace")
-                self.rx_queue.put(("line", line))
-        if pending:
+            if self.streaming:
+                self._extract_wave_frames(pending)
+            else:
+                while b"\n" in pending:
+                    raw_line, _, pending = pending.partition(b"\n")
+                    line = raw_line.rstrip(b"\r").decode("ascii", errors="replace")
+                    self.rx_queue.put(("line", line))
+        if pending and not self.streaming:
             self.rx_queue.put(("line", pending.decode("ascii", errors="replace")))
+
+    def _emit_text_lines(self, raw: bytes) -> None:
+        """Emit complete printable ASCII lines (used while streaming)."""
+        start = 0
+        while True:
+            newline = raw.find(b"\n", start)
+            if newline < 0:
+                return
+            line = raw[start:newline].rstrip(b"\r")
+            start = newline + 1
+            if line and all(32 <= byte < 127 for byte in line):
+                self.rx_queue.put(("line", line.decode("ascii", errors="replace")))
+
+    def _extract_wave_frames(self, pending: bytearray) -> None:
+        """Parse raw (0xA5) and envelope (0xA6) frames; salvage text lines."""
+        while True:
+            raw_start = pending.find(bytes([WAVE_SOF]))
+            stats_start = pending.find(bytes([WAVE_STATS_SOF]))
+            candidates = [pos for pos in (raw_start, stats_start) if pos >= 0]
+            if not candidates:
+                last_newline = pending.rfind(b"\n")
+                if last_newline >= 0:
+                    self._emit_text_lines(bytes(pending[: last_newline + 1]))
+                    del pending[: last_newline + 1]
+                return
+            start = min(candidates)
+            if start > 0:
+                self._emit_text_lines(bytes(pending[:start]))
+                del pending[:start]
+            is_stats = pending[0] == WAVE_STATS_SOF
+            length = WAVE_STATS_FRAME_LEN if is_stats else WAVE_FRAME_LEN
+            if len(pending) < length:
+                return
+            frame = bytes(pending[:length])
+            del pending[:length]
+            checksum = 0
+            for byte in frame[1 : length - 1]:
+                checksum ^= byte
+            if checksum != frame[length - 1]:
+                continue
+            seq = frame[1] | (frame[2] << 8)
+            if is_stats:
+                values = tuple(
+                    int.from_bytes(
+                        frame[3 + 2 * index : 5 + 2 * index],
+                        "little",
+                        signed=True,
+                    )
+                    for index in range(6)
+                )
+                self.rx_queue.put(("wave_stats", (seq, values)))
+            else:
+                iu = int.from_bytes(frame[3:5], "little", signed=True)
+                iv = int.from_bytes(frame[5:7], "little", signed=True)
+                iw = int.from_bytes(frame[7:9], "little", signed=True)
+                self.rx_queue.put(("wave", (seq, iu, iv, iw)))
 
     def _process_rx_queue(self) -> None:
         try:
@@ -571,14 +742,24 @@ class RobotJointApp(tk.Tk):
                 if kind == "line":
                     line = str(payload)
                     self._append_log("rx", f"RX  {line}\n")
-                    self._parse_status_line(line)
+                    try:
+                        self._parse_status_line(line)
+                    except Exception as exc:  # Keep the UI alive on parse bugs.
+                        self._append_log("error", f"解析异常: {exc!r}\n")
+                elif kind == "wave":
+                    self._on_wave_frame(payload)
+                elif kind == "wave_stats":
+                    self._on_wave_stats_frame(payload)
                 else:
                     self._append_log("error", f"串口错误: {payload}\n")
                     if self.connected:
                         self.disconnect()
         except queue.Empty:
             pass
-        self._poll_start_sequence()
+        try:
+            self._poll_start_sequence()
+        except Exception as exc:  # Keep the keepalive/sequence loop alive.
+            self._append_log("error", f"轮询异常: {exc!r}\n")
         self.after(20, self._process_rx_queue)
 
     def _parse_status_line(self, line: str) -> None:
@@ -639,6 +820,17 @@ class RobotJointApp(tk.Tk):
             self.pulse_active = False
             self.auto_keep_var.set(False)
             self._update_keepalive_label()
+
+        pwm_test = PWM_TEST_RE.search(line)
+        if pwm_test:
+            self._freq_pwm_hz = int(pwm_test.group(3))
+            self._update_freq_label()
+
+        encoder_rt = ENCODER_RT_RE.search(line)
+        if encoder_rt:
+            self._freq_enc_rt_hz = int(encoder_rt.group(1))
+            self._freq_foc_hz = int(encoder_rt.group(2))
+            self._update_freq_label()
 
         torque = TORQUE_CMD_RE.search(line)
         if torque:
@@ -761,6 +953,7 @@ class RobotJointApp(tk.Tk):
         if runtime:
             uptime_ms = int(runtime.group(1))
             pwm = int(runtime.group(9))
+            adc = int(runtime.group(10))
             pmiss = int(runtime.group(11))
             focmax = int(runtime.group(18))
             slack = int(runtime.group(24))
@@ -771,6 +964,19 @@ class RobotJointApp(tk.Tk):
                 f"RT t={uptime_ms}ms pwm={pwm} enc={enc} out={out} "
                 f"slk={slack} dmiss={dmiss} pmiss={pmiss} focmax={focmax}"
             )
+            if (
+                self._rt_last_t_ms is not None
+                and self._rt_last_adc is not None
+            ):
+                dt_ms = uptime_ms - self._rt_last_t_ms
+                adc_delta = adc - self._rt_last_adc
+                if 500 <= dt_ms <= 5000 and adc_delta > 0:
+                    derived_khz = round(adc_delta * 1000.0 / dt_ms / 1000.0)
+                    if derived_khz > 0 and self._freq_pwm_hz is None:
+                        self._freq_pwm_hz = derived_khz * 1000
+                        self._update_freq_label()
+            self._rt_last_t_ms = uptime_ms
+            self._rt_last_adc = adc
 
         encoder = ENC_ERR_RE.search(line)
         if encoder:
@@ -802,6 +1008,17 @@ class RobotJointApp(tk.Tk):
                     self._render_eangle_summary(self.eangle_bins)
                     self.eangle_pending = False
                     self.eangle_bins = []
+
+    def _update_freq_label(self) -> None:
+        """Show PWM/FOC/rotor-frame rates once known (boot banner or RT-derived)."""
+        parts: list[str] = []
+        if self._freq_pwm_hz is not None:
+            parts.append(f"PWM {self._freq_pwm_hz / 1000.0:g} kHz")
+        if self._freq_foc_hz is not None:
+            parts.append(f"FOC {self._freq_foc_hz} kHz")
+        if self._freq_enc_rt_hz is not None:
+            parts.append(f"ENC_RT {self._freq_enc_rt_hz} kHz")
+        self.freq_var.set(" | ".join(parts) if parts else "PWM/FOC: 未知")
 
     def _update_health_label(self, fragment: str) -> None:
         """Merge RT and ENC health fragments into one compact label."""
@@ -892,6 +1109,403 @@ class RobotJointApp(tk.Tk):
         if not quiet:
             self._append_log("tx", f"TX  {command.strip()}\n")
         return True
+
+    def start_scope_hold(self) -> None:
+        """Send the 100 kHz fixed-duty scope hold command."""
+        offset = max(5, min(150, self.hold_offset_var.get()))
+        self.hold_offset_var.set(offset)
+        if self.send_command(f"hold {offset}"):
+            self._append_log(
+                "event",
+                f"已发送固定占空比保持 hold {offset}‰；PWM 持续输出，按停止退出。\n",
+            )
+
+    def toggle_wave_stream(self) -> None:
+        """Start/stop the firmware ADC phase-current waveform stream."""
+        if not self.connected:
+            messagebox.showwarning("未连接", "请先连接串口。")
+            return
+        if not self.streaming:
+            dec = max(1, min(100, self.wave_dec_var.get()))
+            self.wave_dec_var.set(dec)
+            use_stats = self.wave_stats_var.get()
+            command = (
+                f"wave stats on 100" if use_stats else f"wave on {dec}"
+            )
+            if self.send_command(command):
+                self.streaming = True
+                self._wave_last_seq = None
+                self._wave_frame_count = 0
+                self._wave_lost_count = 0
+                self._wave_glitch_count = 0
+                self._wave_prev_raw = None
+                self._wave_off_deadline = None
+                for buf in self._wave_buffers.values():
+                    buf.clear()
+                self._wave_stats_entries.clear()
+                self._open_wave_csv()
+                if use_stats:
+                    self.wave_status_var.set("波形: 启动中 (包络, 500 Hz)")
+                else:
+                    self.wave_status_var.set(
+                        f"波形: 启动中 (dec={dec}, 标称 {50000 // dec} Hz)"
+                    )
+                self.wave_toggle_button.configure(text="停止波形")
+        else:
+            if self.send_command("wave off"):
+                self._wave_off_deadline = time.monotonic() + 2.0
+                self.wave_status_var.set("波形: 停止中...")
+
+    def _on_wave_frame(self, frame: tuple[int, int, int, int]) -> None:
+        seq, iu, iv, iw = frame
+        if seq == WAVE_END_SEQ:
+            self.streaming = False
+            self._wave_off_deadline = None
+            self.wave_status_var.set("波形: 已停止")
+            if self.wave_toggle_button is not None:
+                try:
+                    self.wave_toggle_button.configure(text="开始波形")
+                except tk.TclError:
+                    pass
+            self._close_wave_csv()
+            return
+        if self._wave_last_seq is not None:
+            expected = (self._wave_last_seq + 1) & 0xFFFF
+            if seq != expected:
+                self._wave_lost_count += 1
+        self._wave_last_seq = seq
+        self._wave_frame_count += 1
+        if self._wave_prev_raw is not None:
+            prev_u, prev_v, prev_w = self._wave_prev_raw
+            if (
+                abs(iu - prev_u) > WAVE_GLITCH_LSB
+                or abs(iv - prev_v) > WAVE_GLITCH_LSB
+                or abs(iw - prev_w) > WAVE_GLITCH_LSB
+            ):
+                self._wave_glitch_count += 1
+        self._wave_prev_raw = (iu, iv, iw)
+        self._wave_buffers["u"].append((seq, iu))
+        self._wave_buffers["v"].append((seq, iv))
+        self._wave_buffers["w"].append((seq, iw))
+        if self._wave_csv_file is not None:
+            self._wave_csv_rows.append(f"{seq},{iu},{iv},{iw}\n")
+            if len(self._wave_csv_rows) >= 500:
+                self._flush_wave_csv()
+
+    def _on_wave_stats_frame(
+        self, frame: tuple[int, tuple[int, int, int, int, int, int]]
+    ) -> None:
+        seq, values = frame
+        if self._wave_last_seq is not None:
+            expected = (self._wave_last_seq + 1) & 0xFFFF
+            if seq != expected:
+                self._wave_lost_count += 1
+        self._wave_last_seq = seq
+        self._wave_frame_count += 1
+        self._wave_stats_entries.append((seq, values))
+
+    def _open_wave_csv(self) -> None:
+        if not self.wave_save_var.get():
+            return
+        try:
+            folder = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "wave_data"
+            )
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(
+                folder, "wave_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv"
+            )
+            self._wave_csv_file = open(path, "w", encoding="ascii", newline="")
+            self._wave_csv_file.write("seq,iu,iv,iw\n")
+            self._wave_csv_path = path
+            self._wave_csv_rows = []
+            self._append_log("event", f"波形自动保存: {path}\n")
+        except OSError as exc:
+            self._wave_csv_file = None
+            self._wave_csv_path = None
+            self._append_log("error", f"波形文件打开失败: {exc}\n")
+
+    def _flush_wave_csv(self) -> None:
+        if self._wave_csv_file is None or not self._wave_csv_rows:
+            return
+        try:
+            self._wave_csv_file.write("".join(self._wave_csv_rows))
+            self._wave_csv_rows.clear()
+        except OSError as exc:
+            self._append_log("error", f"波形文件写入失败: {exc}\n")
+
+    def _close_wave_csv(self) -> None:
+        if self._wave_csv_file is not None:
+            try:
+                self._flush_wave_csv()
+                self._wave_csv_file.close()
+            except OSError as exc:
+                self._append_log("error", f"波形文件关闭失败: {exc}\n")
+            finally:
+                self._wave_csv_file = None
+        if self._wave_csv_path is not None:
+            self._append_log("event", f"波形已保存: {self._wave_csv_path}\n")
+            self._wave_csv_path = None
+
+    def open_wave_popup(self) -> None:
+        """Open the waveform in a dedicated, resizable window."""
+        if self.wave_popup is not None and self.wave_popup.winfo_exists():
+            self.wave_popup.lift()
+            self.wave_popup.focus_force()
+            return
+        win = tk.Toplevel(self)
+        win.title("电流波形 (独立显示)")
+        win.geometry("1000x560")
+        win.minsize(720, 320)
+        tools = ttk.Frame(win, padding=6)
+        tools.pack(fill=tk.X)
+        self.wave_toggle_button = ttk.Button(
+            tools, text="开始波形", command=self.toggle_wave_stream
+        )
+        self.wave_toggle_button.grid(row=0, column=0, padx=(0, 8))
+        ttk.Label(tools, text="分频(1..100)").grid(
+            row=0, column=1, padx=(0, 4)
+        )
+        self.wave_dec_spin = ttk.Spinbox(
+            tools,
+            from_=1,
+            to=100,
+            textvariable=self.wave_dec_var,
+            width=5,
+            justify="center",
+        )
+        self.wave_dec_spin.grid(row=0, column=2, padx=(0, 12))
+        ttk.Label(tools, text="Y量程").grid(
+            row=0, column=3, padx=(4, 4)
+        )
+        self.wave_scale_combo = ttk.Combobox(
+            tools,
+            textvariable=self.wave_scale_var,
+            values=("自动", "±50", "±100", "±200", "±500"),
+            width=7,
+            state="readonly",
+        )
+        self.wave_scale_combo.grid(row=0, column=4, padx=(0, 8))
+        ttk.Checkbutton(tools, text="U", variable=self.wave_u_var).grid(
+            row=0, column=5, padx=2
+        )
+        ttk.Checkbutton(tools, text="V", variable=self.wave_v_var).grid(
+            row=0, column=6, padx=2
+        )
+        ttk.Checkbutton(tools, text="W", variable=self.wave_w_var).grid(
+            row=0, column=7, padx=2
+        )
+        ttk.Label(tools, textvariable=self.wave_status_var).grid(
+            row=0, column=8, padx=(12, 0), sticky="w"
+        )
+        ttk.Checkbutton(
+            tools, text="自动保存CSV", variable=self.wave_save_var
+        ).grid(row=1, column=4, padx=(8, 4), pady=(4, 0))
+        ttk.Checkbutton(
+            tools, text="包络模式(减带宽)", variable=self.wave_stats_var
+        ).grid(row=1, column=2, padx=(8, 4), pady=(4, 0))
+        ttk.Button(
+            tools, text="保存波形", command=self.save_wave_snapshot
+        ).grid(row=1, column=0, padx=(0, 8), pady=(4, 0))
+        ttk.Button(
+            tools, text="导出日志", command=self.export_log
+        ).grid(row=1, column=1, padx=(0, 8), pady=(4, 0))
+        tools.columnconfigure(9, weight=1)
+        self.wave_popup = win
+        self.wave_popup_canvas = tk.Canvas(
+            win, background="#0d1117", highlightthickness=0
+        )
+        self.wave_popup_canvas.pack(
+            fill=tk.BOTH, expand=True, padx=6, pady=(0, 6)
+        )
+        win.protocol("WM_DELETE_WINDOW", self._close_wave_popup)
+
+    def _close_wave_popup(self) -> None:
+        if self.wave_popup is not None:
+            try:
+                self.wave_popup.destroy()
+            except tk.TclError:
+                pass
+            self.wave_popup = None
+            self.wave_popup_canvas = None
+            self.wave_toggle_button = None
+
+    def save_wave_snapshot(self) -> None:
+        """Save the currently buffered waveform window to a CSV file."""
+        try:
+            folder = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "wave_data"
+            )
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(
+                folder,
+                "wave_snapshot_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv",
+            )
+            buffers = [list(self._wave_buffers[ch]) for ch in ("u", "v", "w")]
+            count = min((len(buf) for buf in buffers), default=0)
+            with open(path, "w", encoding="ascii", newline="") as handle:
+                handle.write("seq,iu,iv,iw\n")
+                for index in range(count):
+                    seq_u, iu = buffers[0][index]
+                    _, iv = buffers[1][index]
+                    _, iw = buffers[2][index]
+                    handle.write(f"{seq_u},{iu},{iv},{iw}\n")
+            self._append_log(
+                "event", f"波形快照已保存: {path} ({count} 帧)\n"
+            )
+        except OSError as exc:
+            self._append_log("error", f"波形快照保存失败: {exc}\n")
+
+    def export_log(self) -> None:
+        """Save the current log panel content to a text file."""
+        try:
+            folder = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "logs"
+            )
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(
+                folder, "log_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+            )
+            content = self.log.get("1.0", tk.END)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            self._append_log("event", f"日志已导出: {path}\n")
+        except (OSError, tk.TclError) as exc:
+            self._append_log("error", f"日志导出失败: {exc}\n")
+
+    def _wave_redraw(self) -> None:
+        canvases: list[tk.Canvas] = []
+        try:
+            popup = self.wave_popup
+            if (
+                popup is not None
+                and popup.winfo_exists()
+                and self.wave_popup_canvas is not None
+            ):
+                canvases.append(self.wave_popup_canvas)
+        except tk.TclError:
+            canvases = []
+        try:
+            if (
+                self.streaming
+                and self._wave_off_deadline is not None
+                and time.monotonic() >= self._wave_off_deadline
+            ):
+                self.streaming = False
+                self._wave_off_deadline = None
+                self.wave_status_var.set("波形: 已停止(未收到结束帧)")
+                if self.wave_toggle_button is not None:
+                    try:
+                        self.wave_toggle_button.configure(text="开始波形")
+                    except tk.TclError:
+                        pass
+                self._close_wave_csv()
+            if self._wave_csv_file is not None and self._wave_csv_rows:
+                self._flush_wave_csv()
+            colors = {"u": "#ff6b6b", "v": "#6bcb77", "w": "#4d96ff"}
+            show = {
+                "u": self.wave_u_var.get(),
+                "v": self.wave_v_var.get(),
+                "w": self.wave_w_var.get(),
+            }
+            series: dict[str, list[tuple[int, int]]] = {}
+            values: list[int] = []
+            for channel in ("u", "v", "w"):
+                buf = self._wave_buffers[channel]
+                if show[channel] and buf:
+                    series[channel] = list(buf)
+                    values.extend(value for _, value in buf)
+            stats_entries = list(self._wave_stats_entries)
+            for _, stats_values in stats_entries:
+                values.extend(stats_values)
+            scale_text = self.wave_scale_var.get()
+            if scale_text.startswith("±"):
+                fixed_scale = float(scale_text[1:])
+                y_min, y_max = -fixed_scale, fixed_scale
+            elif values:
+                low = min(values)
+                high = max(values)
+                y_span = max(high - low, 80)
+                margin = y_span * 0.15
+                y_min = low - margin
+                y_max = high + margin
+            else:
+                y_min, y_max = -100.0, 100.0
+            for canvas in canvases:
+                try:
+                    canvas.delete("wave")
+                except tk.TclError:
+                    continue
+                width = max(canvas.winfo_width(), 200)
+                height = max(canvas.winfo_height(), 160)
+                zero_y = height - (0 - y_min) / (y_max - y_min) * height
+                canvas.create_line(
+                    0, zero_y, width, zero_y, fill="#30363d", tags="wave"
+                )
+                canvas.create_text(
+                    6, 8, anchor="nw", text=f"{y_max:.0f}",
+                    fill="#8b949e", tags="wave",
+                )
+                canvas.create_text(
+                    6, height - 8, anchor="sw", text=f"{y_min:.0f}",
+                    fill="#8b949e", tags="wave",
+                )
+                for channel, points in series.items():
+                    count = len(points)
+                    if count < 2:
+                        continue
+                    coords: list[float] = []
+                    prev_seq = points[0][0]
+                    for index, (seq, value) in enumerate(points):
+                        x = index / (count - 1) * width
+                        y = (
+                            height
+                            - (value - y_min) / (y_max - y_min) * height
+                        )
+                        if index > 0 and ((seq - prev_seq) & 0xFFFF) != 1:
+                            if len(coords) >= 4:
+                                canvas.create_line(
+                                    coords, fill=colors[channel], width=1,
+                                    tags="wave",
+                                )
+                            coords = []
+                        coords.extend((x, y))
+                        prev_seq = seq
+                    if len(coords) >= 4:
+                        canvas.create_line(
+                            coords, fill=colors[channel], width=1, tags="wave"
+                        )
+                stats_count = len(stats_entries)
+                if stats_count >= 2:
+                    for index, (_, stats_values) in enumerate(stats_entries):
+                        x = index / (stats_count - 1) * width
+                        for ch_index, channel in enumerate(("u", "v", "w")):
+                            if not show[channel]:
+                                continue
+                            min_value = stats_values[ch_index * 2]
+                            max_value = stats_values[ch_index * 2 + 1]
+                            y1 = (
+                                height
+                                - (min_value - y_min) / (y_max - y_min) * height
+                            )
+                            y2 = (
+                                height
+                                - (max_value - y_min) / (y_max - y_min) * height
+                            )
+                            canvas.create_line(
+                                x, y1, x, y2, fill=colors[channel], width=2,
+                                tags="wave",
+                            )
+            if self.streaming:
+                self.wave_status_var.set(
+                    "波形: 运行 "
+                    f"| 帧 {self._wave_frame_count} "
+                    f"| 丢帧 {self._wave_lost_count} "
+                    f"| 毛刺(>{WAVE_GLITCH_LSB}) {self._wave_glitch_count}"
+                )
+        except Exception as exc:  # Keep the redraw loop alive on UI hiccups.
+            self._append_log("error", f"波形绘制异常: {exc!r}\n")
+        self.after(50, self._wave_redraw)
 
     def start_motor(self) -> None:
         if self.sequence_active:
@@ -1526,8 +2140,9 @@ class RobotJointApp(tk.Tk):
                      or self.continuous_active)
                 and self.nonzero_iq_active
             ):
-                if not self.send_command("keep", quiet=True,
-                                         strict_quiet=True):
+                if not self.send_command(
+                    "keep", quiet=True, strict_quiet=not self.streaming
+                ):
                     self.keep_busy_retry_count += 1
                     self.after(100, self._keepalive_retry)
                 else:
@@ -1554,7 +2169,9 @@ class RobotJointApp(tk.Tk):
         try:
             if not (self.connected and self.nonzero_iq_active):
                 return
-            if self.send_command("keep", quiet=True, strict_quiet=True):
+            if self.send_command(
+                "keep", quiet=True, strict_quiet=not self.streaming
+            ):
                 self.keep_sent_count += 1
                 return
             self.keep_busy_retry_count += 1
@@ -1613,10 +2230,77 @@ class RobotJointApp(tk.Tk):
 
     def _append_log(self, tag: str, text: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.log.configure(state=tk.NORMAL)
-        self.log.insert(tk.END, f"[{timestamp}] {text}", tag)
-        self.log.see(tk.END)
-        self.log.configure(state=tk.DISABLED)
+        line = f"[{timestamp}] {text}"
+        self._append_log_widget(self.log, tag, line)
+        if self.log_popup_text is not None:
+            try:
+                self._append_log_widget(self.log_popup_text, tag, line)
+            except tk.TclError:
+                self.log_popup_text = None
+                self.log_popup = None
+
+    @staticmethod
+    def _append_log_widget(widget: tk.Text, tag: str, text: str) -> None:
+        widget.configure(state=tk.NORMAL)
+        widget.insert(tk.END, text, tag)
+        widget.see(tk.END)
+        widget.configure(state=tk.DISABLED)
+
+    def open_log_popup(self) -> None:
+        """Open the log in a dedicated, resizable window."""
+        if self.log_popup is not None and self.log_popup.winfo_exists():
+            self.log_popup.lift()
+            self.log_popup.focus_force()
+            return
+        win = tk.Toplevel(self)
+        win.title("收发日志 (独立显示)")
+        win.geometry("920x520")
+        win.minsize(520, 240)
+        text = tk.Text(
+            win,
+            wrap=tk.NONE,
+            state=tk.DISABLED,
+            font=("Consolas", 10),
+            background="#101418",
+            foreground="#d9e2ea",
+            insertbackground="white",
+        )
+        y_scroll = ttk.Scrollbar(win, orient=tk.VERTICAL, command=text.yview)
+        x_scroll = ttk.Scrollbar(win, orient=tk.HORIZONTAL, command=text.xview)
+        text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        win.rowconfigure(0, weight=1)
+        win.columnconfigure(0, weight=1)
+        for tag, color in (
+            ("tx", "#76d7ff"),
+            ("rx", "#d9e2ea"),
+            ("error", "#ff7777"),
+            ("event", "#ffe08a"),
+        ):
+            text.tag_configure(tag, foreground=color)
+        try:
+            content = self.log.get("1.0", tk.END)
+            if content:
+                text.configure(state=tk.NORMAL)
+                text.insert(tk.END, content)
+                text.see(tk.END)
+                text.configure(state=tk.DISABLED)
+        except tk.TclError:
+            pass
+        self.log_popup = win
+        self.log_popup_text = text
+        win.protocol("WM_DELETE_WINDOW", self._close_log_popup)
+
+    def _close_log_popup(self) -> None:
+        if self.log_popup is not None:
+            try:
+                self.log_popup.destroy()
+            except tk.TclError:
+                pass
+            self.log_popup = None
+            self.log_popup_text = None
 
     def _on_close(self) -> None:
         if self.connected and self.serial_port is not None:
