@@ -45,6 +45,8 @@ except ImportError as exc:  # Give a useful GUI-free error when launched directl
         "缺少 pyserial。请执行: python -m pip install -r requirements.txt"
     ) from exc
 
+from rs04_can_panel import Rs04CanPanel
+
 
 BAUD_RATE = 2_500_000
 KEEPALIVE_INTERVAL_MS = 250
@@ -306,6 +308,7 @@ class RobotJointApp(tk.Tk):
         self.can_accepted = 0
         self.can_active_report = False
         self.can_status_var = tk.StringVar(value="CAN: 未初始化")
+        self.rs04_can_panel: Rs04CanPanel | None = None
 
         self._build_ui()
         self.refresh_ports()
@@ -424,7 +427,11 @@ class RobotJointApp(tk.Tk):
             can_tools, text="上报关",
             command=lambda: self.send_command("can report off"),
         ).grid(row=0, column=6, padx=4)
-        can_tools.columnconfigure(7, weight=1)
+        ttk.Button(
+            can_tools, text="USB-CAN 参数验收",
+            command=self.open_rs04_can_panel,
+        ).grid(row=0, column=7, padx=(12, 4))
+        can_tools.columnconfigure(8, weight=1)
         ttk.Label(can_frame, textvariable=self.can_status_var).pack(
             fill=tk.X, pady=(6, 0)
         )
@@ -2454,7 +2461,25 @@ class RobotJointApp(tk.Tk):
             self.log_popup = None
             self.log_popup_text = None
 
+    def open_rs04_can_panel(self) -> None:
+        if self.rs04_can_panel is not None:
+            try:
+                if self.rs04_can_panel.winfo_exists():
+                    self.rs04_can_panel.deiconify()
+                    self.rs04_can_panel.lift()
+                    self.rs04_can_panel.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        self.rs04_can_panel = Rs04CanPanel(self)
+
     def _on_close(self) -> None:
+        if self.rs04_can_panel is not None:
+            try:
+                self.rs04_can_panel.close()
+            except tk.TclError:
+                pass
+            self.rs04_can_panel = None
         if self.connected and self.serial_port is not None:
             try:
                 self.send_command("stop", quiet=True)
