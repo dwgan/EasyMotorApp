@@ -83,6 +83,7 @@ from easymotor.theme import (
     configure_theme,
 )
 from easymotor.transports import USB_CAN_BAUD, UsbCanMotorTransport
+from easymotor.version import window_title
 
 
 messagebox = LocalizedMessageBox(tk_messagebox)
@@ -313,7 +314,7 @@ class EasyMotorApp(tk.Tk):
         super().__init__()
         apply_window_icon(self, set_default=True)
         configure_theme(self)
-        self.title("EasyMotor")
+        self.title(window_title())
         self.geometry("900x680")
         self.minsize(820, 620)
 
@@ -1053,7 +1054,7 @@ class EasyMotorApp(tk.Tk):
         )
 
     def on_language_changed(self) -> None:
-        self.title(tr(self.language_var.get(), "app_title"))
+        self.title(window_title(tr(self.language_var.get(), "app_title")))
         self._refresh_localized_vars()
         self.connection_var.set(
             (

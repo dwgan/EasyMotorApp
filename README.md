@@ -18,6 +18,40 @@ python easymotor_app.py
 也可以直接双击 `run_app.bat`。Windows 官方 Python 通常自带 Tkinter；
 如果启动时报缺 `tkinter`，请重新运行 Python 安装程序并启用 Tcl/Tk 组件。
 
+## 构建单文件 EXE
+
+双击 `build_easymotor_release.bat`，或在 PowerShell 中执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_release.ps1 -Clean
+```
+
+脚本默认安装 `requirements.txt` 和 `requirements-build.txt` 中的依赖、运行软件测试，并使用
+PyInstaller 的 `--onefile --windowed` 模式生成一个无需 Python 环境的 Windows GUI 可执行文件：
+
+```text
+release\EasyMotor_v1.0.0_win-x64.exe
+```
+
+版本号默认读取 `easymotor/version.py`，同时写入软件标题、EXE 文件名和 Windows 文件属性中的
+FileVersion、ProductVersion、ProductName、FileDescription、CompanyName 等字段。正式发布时应先修改
+`easymotor/version.py`；临时构建也可使用 `-Version 1.2.3`，脚本会通过运行时钩子保证界面标题与
+EXE 元数据一致。常用选项：
+
+```powershell
+# 生成指定版本，并额外输出 SHA-256 文件
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_release.ps1 -Clean -Version 1.2.3 -WriteChecksum
+
+# 已自行安装依赖时跳过 pip
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_release.ps1 -Clean -NoInstallDependencies
+
+# 仅在紧急诊断构建中跳过测试，不建议用于正式发布
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_release.ps1 -Clean -SkipTests
+```
+
+`build/` 仅保存 PyInstaller 中间文件；可交付物位于 `release/`。默认不会生成 onedir 文件夹、ZIP
+或校验和旁文件，因此每个版本的默认交付物只有一个 EXE。
+
 ## 两种使用模式
 
 ### 演示模式（默认）
