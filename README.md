@@ -98,6 +98,18 @@ python robot_joint_app.py
 固件拒绝并保持原值；必须同时在 COM4 确认 `CAN_PARAM: write rejected`，
 最后通过 `can status` 确认 `param_write_rejected` 计数增加 3。
 
+### 阶段 4：无动力 CAN 长稳
+
+CAN 参数窗口提供独立的长稳区，只以 100 ms 周期轮询 Type 17 参数
+`run_mode`、`mechPos`、`mechVel`、`EPScan_time`、`cantimeout`，单次响应超时
+为 500 ms。长稳期间会阻止枚举、手动读写和拒绝测试，并且不会发送使能、运控、
+写参数、置零或修改 CAN ID 报文。
+
+正式验收前保持功率级关闭、`mci=0`，在 COM4 点击“查询状态”保存开始基线；
+时长保持 60 分钟，完成后导出 CSV，再次查询状态。通过条件为上位机超时、拒绝和
+发送失败均为 0，`TX=response`，固件 BusOff/收发错误/FIFO 丢失不增长，且
+`param_read_ok` 增量等于上位机响应数。测试期间不要执行其他 CAN 操作。
+
 ## 安全边界
 
 - GUI 将转矩输入限制为 1..100 LSB（约 ±1.0 A）；速度限制为 -20..20
