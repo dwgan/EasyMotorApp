@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import queue
 import re
+import sys
 import threading
 import time
 import tkinter as tk
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox as tk_messagebox, ttk
 import os
 
@@ -48,6 +50,7 @@ except ImportError as exc:  # Give a useful GUI-free error when launched directl
 from easymotor.branding import apply_window_icon, configure_windows_app_id
 from easymotor.features.can_tool import CanToolWindow
 from easymotor.features.demo import DemoView
+from easymotor.features.update_dialog import UpdateDialog
 from easymotor.i18n import (
     DEFAULT_LANGUAGE,
     LocalizedMessageBox,
@@ -84,7 +87,9 @@ from easymotor.theme import (
     configure_theme,
 )
 from easymotor.transports import USB_CAN_BAUD, UsbCanMotorTransport
-from easymotor.version import window_title
+from easymotor.updates import UpdateRelease, launch_update_helper
+from easymotor.updates.installer import acknowledge_healthy_start, health_marker_from_argv
+from easymotor.version import __version__, window_title
 
 
 messagebox = LocalizedMessageBox(tk_messagebox)
@@ -442,6 +447,7 @@ class EasyMotorApp(tk.Tk):
         self.can_active_report = False
         self.can_status_var = localized_var("CAN: 未初始化")
         self.can_tool_window: CanToolWindow | None = None
+        self.update_dialog: UpdateDialog | None = None
         self.demo_service = DemoService()
         self.app_mode = "demo"
 
@@ -456,13 +462,20 @@ class EasyMotorApp(tk.Tk):
         self.copyright_var = tk.StringVar(
             value=tr(self.language_var.get(), "copyright")
         )
+        footer = ttk.Frame(self, padding=(12, 2))
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.update_button = ttk.Button(
+            footer,
+            text=tr(self.language_var.get(), "check_updates"),
+            command=self.open_update_dialog,
+        )
+        self.update_button.pack(side=tk.LEFT)
         ttk.Label(
-            self,
+            footer,
             textvariable=self.copyright_var,
             foreground=MUTED_TEXT,
             anchor=tk.E,
-            padding=(12, 4),
-        ).pack(side=tk.BOTTOM, fill=tk.X)
+        ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
         self.demo_view = DemoView(
             self,
@@ -1068,6 +1081,7 @@ class EasyMotorApp(tk.Tk):
     def on_language_changed(self) -> None:
         self.title(window_title(tr(self.language_var.get(), "app_title")))
         self.copyright_var.set(tr(self.language_var.get(), "copyright"))
+        self.update_button.configure(text=tr(self.language_var.get(), "check_updates"))
         self._refresh_localized_vars()
         self.connection_var.set(
             (
@@ -1103,6 +1117,12 @@ class EasyMotorApp(tk.Tk):
             try:
                 if self.can_tool_window.winfo_exists():
                     self.can_tool_window.refresh_language()
+            except tk.TclError:
+                pass
+        if self.update_dialog is not None:
+            try:
+                if self.update_dialog.winfo_exists():
+                    self.update_dialog.refresh_language()
             except tk.TclError:
                 pass
         self._rerender_logs()
@@ -3181,7 +3201,60 @@ class EasyMotorApp(tk.Tk):
                 pass
         self.can_tool_window = CanToolWindow(self, language_var=self.language_var)
 
+    def open_update_dialog(self) -> None:
+        if self.update_dialog is not None:
+            try:
+                if self.update_dialog.winfo_exists():
+                    self.update_dialog.lift()
+                    self.update_dialog.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        self.update_dialog = UpdateDialog(
+            self,
+            language_getter=self.language_var.get,
+            current_version=__version__,
+            on_install_ready=self._install_downloaded_update,
+        )
+
+    def _install_downloaded_update(self, path: Path, release: UpdateRelease) -> None:
+        del release
+        language = self.language_var.get()
+        if self.connected or self._motor_activity_active():
+            messagebox.showwarning(
+                tr(language, "update_install_title"),
+                tr(language, "update_requires_idle"),
+            )
+            return
+        if not messagebox.askyesno(
+            tr(language, "update_install_title"),
+            tr(language, "update_install_confirm"),
+        ):
+            return
+        try:
+            launch_update_helper(path, Path(sys.executable))
+        except Exception as exc:
+            messagebox.showerror(
+                tr(language, "update_install_title"),
+                tr(language, "update_install_failed", error=str(exc)),
+            )
+            return
+        if self.update_dialog is not None:
+            try:
+                self.update_dialog.destroy()
+            except tk.TclError:
+                pass
+            self.update_dialog = None
+        self.after(100, self._on_close)
+
     def _on_close(self) -> None:
+        if self.update_dialog is not None:
+            try:
+                self.update_dialog.cancel_event.set()
+                self.update_dialog.destroy()
+            except tk.TclError:
+                pass
+            self.update_dialog = None
         if self.can_tool_window is not None:
             try:
                 self.can_tool_window.close()
@@ -3199,4 +3272,8 @@ class EasyMotorApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    EasyMotorApp().mainloop()
+    health_marker = health_marker_from_argv()
+    app = EasyMotorApp()
+    if health_marker is not None:
+        app.after(500, acknowledge_healthy_start, health_marker)
+    app.mainloop()

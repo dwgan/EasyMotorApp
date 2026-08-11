@@ -26,6 +26,8 @@ class TranslationTests(unittest.TestCase):
         )
         self.assertEqual(tr("en", "engineer_mode"), "Advanced")
         self.assertEqual(tr("zh_CN", "engineer_mode"), "高级模式")
+        self.assertEqual(tr("en", "check_updates"), "Check for updates")
+        self.assertEqual(tr("zh_CN", "check_updates"), "检查更新")
 
     def test_engineering_statuses_translate_without_chinese(self):
         examples = (

@@ -10,7 +10,7 @@ from typing import Final
 
 
 APP_USER_MODEL_ID: Final = "EasyMotor.Desktop"
-APP_ICON_PATH: Final = Path(__file__).resolve().parents[1] / "logo.ico"
+APP_ICON_PATH: Final = Path(__file__).resolve().parents[1] / "favicon.ico"
 
 
 def configure_windows_app_id() -> bool:

@@ -34,6 +34,9 @@ class ReleasePackagingTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, script)
         self.assertNotIn('"--onedir"', script)
+        app_source = (PROJECT_ROOT / "easymotor_app.py").read_text(encoding="utf-8")
+        self.assertIn("easymotor.features.update_dialog", app_source)
+        self.assertIn("easymotor.updates.installer", app_source)
         self.assertIn("$invalidVersionParts = @(", script)
         self.assertIn("if ($invalidVersionParts.Count -gt 0)", script)
 

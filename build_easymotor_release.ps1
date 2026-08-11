@@ -24,7 +24,7 @@ Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $entryScript = Join-Path $scriptDir "easymotor_app.py"
-$iconPath = Join-Path $scriptDir "logo.ico"
+$iconPath = Join-Path $scriptDir "favicon.ico"
 $runtimeRequirements = Join-Path $scriptDir "requirements.txt"
 $buildRequirements = Join-Path $scriptDir "requirements-build.txt"
 $buildRoot = Join-Path $scriptDir "build\easymotor_release"

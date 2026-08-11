@@ -52,6 +52,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_releas
 `build/` 仅保存 PyInstaller 中间文件；可交付物位于 `release/`。默认不会生成 onedir 文件夹、ZIP
 或校验和旁文件，因此每个版本的默认交付物只有一个 EXE。
 
+## GitHub 手动更新
+
+演示模式和高级模式底部都提供“检查更新 / Check for updates”。EasyMotor 只在用户点击时访问公开的
+`dwgan/EasyMotor` GitHub Releases，不会在启动时联网。源码运行时可以查看 Release 页面；只有打包后的
+EXE 才允许原位更新。
+
+正式稳定版本使用 `vX.Y.Z` 标签，并同时包含：
+
+```text
+EasyMotor_vX.Y.Z_win-x64.exe
+easymotor-update.json
+```
+
+客户端会同时校验清单、GitHub asset digest、文件长度、SHA-256、PE x64 架构和 Windows 版本资源。
+安装前必须停止电机并断开通信；替换程序在 EasyMotor 退出后运行，需要时申请 UAC，并在新版本未能
+健康启动时恢复旧 EXE。发布端由独立 `publisher` orphan branch 中的 EasyMotor Publisher 管理，客户
+软件中不包含 GitHub Token。
+
 ## 两种使用模式
 
 ### 演示模式（默认）
