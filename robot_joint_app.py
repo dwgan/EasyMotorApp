@@ -17,6 +17,7 @@ Telemetry parsed:
   PWM_TEST     boot/verbose PWM bring-up line (freq/ARR/CCR)
   ENCODER_RT   boot line advertising rotor-frame and FOC rates
   WAVE_STREAM  binary ADC phase-current frames while "wave on" is active
+  CAN_NODE     RS04 CAN node boot/status lines and debug commands
 
 Successful `keep` is silent on the firmware side; a rejected `keep` is
 visible.  The MCU remains the final authority for current limits, state
@@ -169,6 +170,19 @@ WAVE_END_SEQ = 0xFFFF
 WAVE_BUFFER_MAX = 1500
 WAVE_GLITCH_LSB = 60
 
+CAN_READY_RE = re.compile(r"CAN_NODE READY")
+CAN_NODE_ID_RE = re.compile(r"CAN_NODE_ID=(\d+)")
+CAN_MASTER_ID_RE = re.compile(r"CAN_MASTER_ID=(\d+)")
+CAN_STBY_NORMAL_RE = re.compile(r"CMD can stby 0: transceiver normal mode")
+CAN_STBY_STANDBY_RE = re.compile(r"CMD can stby 1: transceiver standby")
+CAN_STATUS_HEAD_RE = re.compile(r"CAN_NODE STATUS")
+CAN_STATUS_ID_RE = re.compile(r"^  (node_id|master_id)=0x(\d+)$")
+CAN_STATUS_FIELD_RE = re.compile(r"^  (\w+)=(\d+)$")
+CAN_LOOP_PASS_RE = re.compile(r"CAN_LOOP PASS")
+CAN_LOOP_FAIL_RE = re.compile(r"CAN_LOOP FAIL")
+CAN_CODEC_PASS_RE = re.compile(r"CAN_CODEC PASS")
+CAN_CODEC_FAIL_RE = re.compile(r"CAN_CODEC FAIL")
+
 
 def format_torque_error(error_code: int) -> str:
     """Decode the TORQUE_CMD error bitmask into readable labels."""
@@ -279,6 +293,19 @@ class RobotJointApp(tk.Tk):
         self.wave_toggle_button: ttk.Button | None = None
         self.log_popup: tk.Toplevel | None = None
         self.log_popup_text: tk.Text | None = None
+        self.can_ready = False
+        self.can_node_id: int | None = None
+        self.can_master_id: int | None = None
+        self.can_normal = False
+        self.can_rx_frames = 0
+        self.can_tx_requests = 0
+        self.can_tx_fail = 0
+        self.can_tx_err = 0
+        self.can_rx_err = 0
+        self.can_bus_off = 0
+        self.can_accepted = 0
+        self.can_active_report = False
+        self.can_status_var = tk.StringVar(value="CAN: 未初始化")
 
         self._build_ui()
         self.refresh_ports()
@@ -362,6 +389,45 @@ class RobotJointApp(tk.Tk):
             row=6, column=0, sticky="w", pady=(4, 0)
         )
         motion_frame.columnconfigure(0, weight=1)
+
+        can_frame = ttk.LabelFrame(
+            outer, text="CAN 调试 (RS04 从机 / 1Mbps 经典扩展帧)", padding=8
+        )
+        can_frame.pack(fill=tk.X, pady=(10, 0))
+        can_tools = ttk.Frame(can_frame)
+        can_tools.pack(fill=tk.X)
+        ttk.Button(
+            can_tools, text="查询状态",
+            command=lambda: self.send_command("can status"),
+        ).grid(row=0, column=0, padx=(0, 4))
+        ttk.Button(
+            can_tools, text="正常模式",
+            command=lambda: self.send_command("can stby 0"),
+        ).grid(row=0, column=1, padx=4)
+        ttk.Button(
+            can_tools, text="待机",
+            command=lambda: self.send_command("can stby 1"),
+        ).grid(row=0, column=2, padx=4)
+        ttk.Button(
+            can_tools, text="自回环",
+            command=lambda: self.send_command("can loop"),
+        ).grid(row=0, column=3, padx=4)
+        ttk.Button(
+            can_tools, text="编解码自检",
+            command=lambda: self.send_command("can codec"),
+        ).grid(row=0, column=4, padx=4)
+        ttk.Button(
+            can_tools, text="上报开",
+            command=lambda: self.send_command("can report on"),
+        ).grid(row=0, column=5, padx=4)
+        ttk.Button(
+            can_tools, text="上报关",
+            command=lambda: self.send_command("can report off"),
+        ).grid(row=0, column=6, padx=4)
+        can_tools.columnconfigure(7, weight=1)
+        ttk.Label(can_frame, textvariable=self.can_status_var).pack(
+            fill=tk.X, pady=(6, 0)
+        )
 
         controls = ttk.LabelFrame(outer, text="安全控制", padding=10)
         controls.pack(fill=tk.X, pady=(10, 0))
@@ -631,6 +697,19 @@ class RobotJointApp(tk.Tk):
         self._rt_last_t_ms = None
         self._rt_last_adc = None
         self.freq_var.set("PWM/FOC: 未知")
+        self.can_ready = False
+        self.can_node_id = None
+        self.can_master_id = None
+        self.can_normal = False
+        self.can_rx_frames = 0
+        self.can_tx_requests = 0
+        self.can_tx_fail = 0
+        self.can_tx_err = 0
+        self.can_rx_err = 0
+        self.can_bus_off = 0
+        self.can_accepted = 0
+        self.can_active_report = False
+        self.can_status_var.set("CAN: 未初始化")
         self.streaming = False
         self._wave_off_deadline = None
         self._close_wave_csv()
@@ -832,6 +911,62 @@ class RobotJointApp(tk.Tk):
             self._freq_foc_hz = int(encoder_rt.group(2))
             self._update_freq_label()
 
+        if CAN_READY_RE.search(line):
+            self.can_ready = True
+            self._update_can_label()
+        node_id_match = CAN_NODE_ID_RE.search(line)
+        if node_id_match:
+            self.can_node_id = int(node_id_match.group(1))
+            self._update_can_label()
+        master_id_match = CAN_MASTER_ID_RE.search(line)
+        if master_id_match:
+            self.can_master_id = int(master_id_match.group(1))
+            self._update_can_label()
+        if CAN_STBY_NORMAL_RE.search(line):
+            self.can_normal = True
+            self._update_can_label()
+        if CAN_STBY_STANDBY_RE.search(line):
+            self.can_normal = False
+            self._update_can_label()
+        id_field = CAN_STATUS_ID_RE.match(line)
+        if id_field:
+            if id_field.group(1) == "node_id":
+                self.can_node_id = int(id_field.group(2))
+            else:
+                self.can_master_id = int(id_field.group(2))
+            self._update_can_label()
+        field = CAN_STATUS_FIELD_RE.match(line)
+        if field:
+            key = field.group(1)
+            value = int(field.group(2))
+            if key == "normal":
+                self.can_normal = value != 0
+            elif key == "rx_frames":
+                self.can_rx_frames = value
+            elif key == "tx_requests":
+                self.can_tx_requests = value
+            elif key == "tx_fail":
+                self.can_tx_fail = value
+            elif key == "tx_err_cnt":
+                self.can_tx_err = value
+            elif key == "rx_err_cnt":
+                self.can_rx_err = value
+            elif key == "bus_off":
+                self.can_bus_off = value
+            elif key == "accepted":
+                self.can_accepted = value
+            elif key == "active_report":
+                self.can_active_report = value != 0
+            self._update_can_label()
+        if CAN_LOOP_PASS_RE.search(line):
+            self._append_log("event", "CAN 自回环通过\n")
+        elif CAN_LOOP_FAIL_RE.search(line):
+            self._append_log("error", "CAN 自回环失败\n")
+        if CAN_CODEC_PASS_RE.search(line):
+            self._append_log("event", "CAN 编解码自检通过\n")
+        elif CAN_CODEC_FAIL_RE.search(line):
+            self._append_log("error", "CAN 编解码自检失败\n")
+
         torque = TORQUE_CMD_RE.search(line)
         if torque:
             state = int(torque.group(1))
@@ -1019,6 +1154,23 @@ class RobotJointApp(tk.Tk):
         if self._freq_enc_rt_hz is not None:
             parts.append(f"ENC_RT {self._freq_enc_rt_hz} kHz")
         self.freq_var.set(" | ".join(parts) if parts else "PWM/FOC: 未知")
+
+    def _update_can_label(self) -> None:
+        """Compose the compact CAN node status label."""
+        if not self.can_ready:
+            self.can_status_var.set("CAN: 未初始化")
+            return
+        mode = "正常模式" if self.can_normal else "待机(静默)"
+        node = f"0x{self.can_node_id:X}" if self.can_node_id is not None else "?"
+        master = f"0x{self.can_master_id:X}" if self.can_master_id is not None else "?"
+        report = "开" if self.can_active_report else "关"
+        self.can_status_var.set(
+            f"CAN 就绪 | 节点={node} 主机={master} | {mode} "
+            f"| RX {self.can_rx_frames} TX {self.can_tx_requests} "
+            f"(TX失败 {self.can_tx_fail}) "
+            f"| 错误 T/R={self.can_tx_err}/{self.can_rx_err} "
+            f"| BusOff {self.can_bus_off} | 上报 {report}"
+        )
 
     def _update_health_label(self, fragment: str) -> None:
         """Merge RT and ENC health fragments into one compact label."""
