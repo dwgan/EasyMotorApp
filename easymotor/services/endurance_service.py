@@ -1,11 +1,11 @@
-"""Pure state machine for the stage-4 non-motion RS04 CAN endurance test."""
+"""Pure state machine for a non-motion CAN endurance test."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Final
 
-from rs04_can import PARAMETER_BY_INDEX
+from easymotor.protocols.can_motor import PARAMETER_BY_INDEX
 
 
 LONG_RUN_PARAMETER_INDICES: Final = (

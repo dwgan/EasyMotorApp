@@ -1,7 +1,7 @@
 import unittest
 
-from rs04_can import build_parameter_read, split_id
-from rs04_long_run import LONG_RUN_PARAMETER_INDICES, LongRunSession
+from easymotor.protocols.can_motor import build_parameter_read, split_id
+from easymotor.services.endurance_service import LONG_RUN_PARAMETER_INDICES, LongRunSession
 
 
 class LongRunSessionTests(unittest.TestCase):

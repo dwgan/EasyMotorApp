@@ -1,0 +1,1 @@
+"""EasyMotor desktop application package."""

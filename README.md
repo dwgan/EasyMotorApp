@@ -1,7 +1,8 @@
-# RobotJointG5 / ICMU150 调试上位机
+# EasyMotor 电机演示与工程工具
 
-基于 Python Tkinter 和 pyserial 的 Stage-H/Stage-I 转矩与低速命令调试工具，
-协议与当前固件 `motor_command_console.c` 对齐（UART5 2.5 Mbit/s 8N1 RS485）。
+EasyMotor 是基于 Python Tkinter 和 pyserial 的电机演示与工程调试工具。软件每次启动
+默认进入英文、CAN 接口的简洁演示模式；可切换中文和备用 RS485 接口。工程师可主动进入
+完整调试界面。两个模式共用相同的限值、停止重试和 MCU 安全保护。
 
 ## 安装与启动
 
@@ -11,11 +12,52 @@ PATH" 和 Tcl/Tk 组件。
 ```powershell
 cd D:\Workspace\RobotJointG5\RobotJointApp_ICMU150
 python -m pip install -r requirements.txt
-python robot_joint_app.py
+python easymotor_app.py
 ```
 
 也可以直接双击 `run_app.bat`。Windows 官方 Python 通常自带 Tkinter；
 如果启动时报缺 `tkinter`，请重新运行 Python 安装程序并启用 Tcl/Tk 组件。
+
+## 两种使用模式
+
+### 演示模式（默认）
+
+- 默认英文界面，可在右上角切换 English/中文；
+- 默认官方 USB-CAN（串口 921600 baud，CAN 1 Mbps），RS485 为备用；
+- 启动后只显示接口、设备连接、状态、5/10/20 motor rpm、正转、停止和反转；
+- 默认每次运行 5 秒，到点自动停止；
+- 勾选“一直转”后持续刷新速度命令，直到点击停止、连接断开、出现故障或 MCU 看门狗介入；
+- CAN 自动执行 `Type 3 → 等待 Type 2 MOTOR → Type 1 → Type 4`；RS485 自动执行
+  `start → 等待 RUN → speed → keep → stop`，用户不需要理解对齐和 MCI；
+- 每次启动都回到演示模式，“一直转”默认不勾选。
+
+当前固件上电后 CAN 收发器默认待机。若 CAN 枚举超时，EasyMotor 会提示工程师先在高级模式
+通过 RS485 执行一次“CAN 正常模式”；这不是 CAN 报文能够自行解除的状态。
+
+### 工程师模式
+
+电机停止后可从右上角进入。工程师模式保留手动 Iq/速度、持续运行、Stage-I 验收、
+实时遥测、波形、CAN 参数、长稳和原始日志等功能。切换模式不会放宽任何软件或固件
+安全限制。
+
+主界面的 English/中文选择是全局语言设置：演示页、工程师页、CAN 参数工具、波形窗口、日志窗口，以及运行时状态和弹窗会同步切换。协议标识、CAN 原始帧和固件原始输出保持原样，便于工程诊断和协议比对。
+
+## 工程结构
+
+`easymotor_app.py` 是主启动入口，`robot_joint_app.py` 仅保留为旧快捷方式兼容层；通用功能
+放在 `easymotor/` 包中：
+
+- `core/safety_policy.py`：演示档位、时长和安全计划；
+- `i18n.py`：产品外壳的中英文文本；
+- `services/demo_service.py`：演示准备与运行状态机；
+- `services/endurance_service.py`：CAN 长稳调度与统计；
+- `protocols/can_motor.py`：CAN 电机协议编解码；
+- `transports/usb_can.py`：官方 USB-CAN 串口传输；
+- `features/demo/view.py`：默认演示页面；
+- `features/can_tool/window.py`：工程师 CAN 工具窗口。
+
+通用 Python 文件名不使用具体电机型号；实际兼容的 RS04 协议仍在界面和协议说明中明确标注。
+完整的模式边界、统一控制链和后续拆分顺序见 `docs/APP_ARCHITECTURE.md`。
 
 ## 当前协议（固件 v2_free_run，ClosedLoop/Stage-H 命令面）
 

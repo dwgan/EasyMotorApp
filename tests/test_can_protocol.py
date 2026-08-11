@@ -1,21 +1,63 @@
 import unittest
 
-from rs04_can import (
+from easymotor.protocols.can_motor import (
     AtFrameDecoder,
     CanFrame,
+    MODE_MOTOR,
+    build_active_report,
     build_device_id_request,
+    build_enable,
     build_parameter_read,
     build_parameter_write,
     build_rejection_probe,
+    build_stop,
+    build_velocity_control,
     encode_at_frame,
     make_id,
     parse_device_id_response,
+    parse_feedback,
     parse_parameter_response,
     split_id,
 )
 
 
-class Rs04ProtocolTests(unittest.TestCase):
+class CanProtocolTests(unittest.TestCase):
+    def test_type3_enable_type4_stop_and_type24_reporting(self):
+        self.assertEqual(build_enable(), CanFrame(0x0300FD7F, bytes(8)))
+        self.assertEqual(build_stop(), CanFrame(0x0400FD7F, bytes(8)))
+        self.assertEqual(
+            build_active_report(True),
+            CanFrame(0x1800FD7F, bytes.fromhex("00 00 00 00 00 00 00 01")),
+        )
+
+    def test_type1_demo_velocity_keeps_all_reserved_fields_at_zero(self):
+        frame = build_velocity_control(10)
+        self.assertEqual(frame.arbitration_id, 0x0180007F)
+        self.assertEqual(frame.data[0:2], bytes.fromhex("80 00"))
+        self.assertEqual(frame.data[2:4], bytes.fromhex("80 4C"))
+        self.assertEqual(frame.data[4:8], bytes(4))
+
+    def test_type1_rejects_speed_outside_demo_envelope(self):
+        for value in (-21, 21, 5.0, True):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    build_velocity_control(value)
+        with self.assertRaises(ValueError):
+            build_velocity_control(5, node_id=0x80)
+
+    def test_type2_feedback_decodes_mode_faults_and_big_endian_values(self):
+        frame = CanFrame(
+            make_id(2, 0x807F, 0xFD),
+            bytes.fromhex("80 00 80 00 80 00 00 FA"),
+        )
+        feedback = parse_feedback(frame)
+        self.assertEqual(feedback.node_id, 0x7F)
+        self.assertEqual(feedback.mode, MODE_MOTOR)
+        self.assertEqual(feedback.faults, 0)
+        self.assertAlmostEqual(feedback.temperature_c, 25.0)
+        self.assertAlmostEqual(feedback.position_rad, 0.0, places=3)
+        self.assertAlmostEqual(feedback.velocity_rad_s, 0.0, places=2)
+
     def test_id_fields_follow_official_29_bit_layout(self):
         arbitration_id = make_id(18, 0x00FD, 0x01)
         self.assertEqual(arbitration_id, 0x1200FD01)

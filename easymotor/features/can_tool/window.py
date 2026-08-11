@@ -8,12 +8,20 @@ import threading
 import time
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox as tk_messagebox, ttk
 
 import serial
 from serial.tools import list_ports
 
-from rs04_can import (
+from easymotor.branding import apply_window_icon
+from easymotor.i18n import (
+    DEFAULT_LANGUAGE,
+    LocalizedMessageBox,
+    LocalizedStringVar,
+    localize_legacy,
+)
+
+from easymotor.protocols.can_motor import (
     AtFrameDecoder,
     CanFrame,
     PARAMETERS,
@@ -28,20 +36,34 @@ from rs04_can import (
     parse_parameter_response,
     split_id,
 )
-from rs04_long_run import LongRunSession
+from easymotor.services.endurance_service import LongRunSession
+from easymotor.theme import (
+    LOG_BACKGROUND,
+    LOG_ERROR,
+    LOG_EVENT,
+    LOG_FOREGROUND,
+    LOG_TX,
+    WARNING_TEXT,
+    apply_window_surface,
+)
 
 
 USB_CAN_BAUD = 921_600
+messagebox = LocalizedMessageBox(tk_messagebox)
 
 
-class Rs04CanPanel(tk.Toplevel):
+class CanToolWindow(tk.Toplevel):
     """Safe stage-3/4 tooling for the official RobStride USB-CAN module."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, *, language_var: tk.StringVar | None = None) -> None:
         super().__init__(master)
-        self.title("RS04 官方 CAN 协议参数验收")
-        self.geometry("980x820")
-        self.minsize(820, 680)
+        apply_window_icon(self)
+        apply_window_surface(self)
+        self.language_var = language_var or tk.StringVar(self, value=DEFAULT_LANGUAGE)
+        messagebox.set_language_getter(self.language_var.get)
+        self.title(self._ui("CAN 电机协议工具"))
+        self.geometry("980x650")
+        self.minsize(820, 560)
 
         self.connection: serial.Serial | None = None
         self.connection_lock = threading.Lock()
@@ -58,20 +80,24 @@ class Rs04CanPanel(tk.Toplevel):
         self._long_run_node_id = 0x7F
         self._long_run_host_id = 0xFD
 
+        localized_var = lambda value="": LocalizedStringVar(self, self.language_var.get, value)
         self.port_var = tk.StringVar()
-        self.connection_var = tk.StringVar(value="USB-CAN：未连接")
+        self.connection_var = localized_var("USB-CAN：未连接")
         self.node_id_var = tk.IntVar(value=0x7F)
         self.host_id_var = tk.IntVar(value=0xFD)
         self.parameter_var = tk.StringVar()
         self.value_var = tk.StringVar()
-        self.parameter_help_var = tk.StringVar()
-        self.last_value_var = tk.StringVar(value="当前值：尚未读取")
+        self.parameter_help_var = localized_var()
+        self.last_value_var = localized_var("当前值：尚未读取")
         self.long_run_minutes_var = tk.IntVar(value=60)
-        self.long_run_status_var = tk.StringVar(value="长稳状态：未开始")
+        self.long_run_status_var = localized_var("长稳状态：未开始")
+        self.show_log_var = tk.BooleanVar(value=False)
+        self._log_entries: list[tuple[str, str, str]] = []
 
         self._build_ui()
         self.refresh_ports()
         self._on_parameter_selected()
+        self.refresh_language()
         self._poll_after_id = self.after(20, self._process_rx_queue)
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -132,10 +158,19 @@ class Rs04CanPanel(tk.Toplevel):
         ).grid(row=0, column=5, padx=(18, 0), sticky="w")
         identity_frame.columnconfigure(5, weight=1)
 
+        self.feature_tabs = ttk.Notebook(outer)
+        self.feature_tabs.pack(fill=tk.X, pady=(10, 0))
+        self.parameter_tab = ttk.Frame(self.feature_tabs, padding=8)
+        self.endurance_tab = ttk.Frame(self.feature_tabs, padding=8)
+        self.diagnostics_tab = ttk.Frame(self.feature_tabs, padding=8)
+        self.feature_tabs.add(self.parameter_tab, text="参数管理")
+        self.feature_tabs.add(self.endurance_tab, text="长稳测试")
+        self.feature_tabs.add(self.diagnostics_tab, text="高级诊断")
+
         parameter_frame = ttk.LabelFrame(
-            outer, text="单参数读写（通信类型 17 / 18）", padding=10
+            self.parameter_tab, text="单参数读写（通信类型 17 / 18）", padding=10
         )
-        parameter_frame.pack(fill=tk.X, pady=(10, 0))
+        parameter_frame.pack(fill=tk.X)
         ttk.Label(parameter_frame, text="参数").grid(row=0, column=0, sticky="w")
         labels = [self._parameter_label(item.index) for item in PARAMETERS]
         self.parameter_combo = ttk.Combobox(
@@ -187,9 +222,9 @@ class Rs04CanPanel(tk.Toplevel):
         parameter_frame.columnconfigure(1, weight=1)
 
         rejection_frame = ttk.LabelFrame(
-            outer, text="阶段 3 固件拒绝路径（固定无动力报文）", padding=10
+            self.diagnostics_tab, text="阶段 3 固件拒绝路径（固定无动力报文）", padding=10
         )
-        rejection_frame.pack(fill=tk.X, pady=(10, 0))
+        rejection_frame.pack(fill=tk.X)
         ttk.Label(
             rejection_frame,
             text="预期三项均被固件拒绝；发送后必须在 COM4 确认 CAN_PARAM: write rejected。",
@@ -209,9 +244,9 @@ class Rs04CanPanel(tk.Toplevel):
         rejection_frame.columnconfigure(3, weight=1)
 
         long_run_frame = ttk.LabelFrame(
-            outer, text="阶段 4：无动力 CAN 长稳（只读 Type 17）", padding=10
+            self.endurance_tab, text="阶段 4：无动力 CAN 长稳（只读 Type 17）", padding=10
         )
-        long_run_frame.pack(fill=tk.X, pady=(10, 0))
+        long_run_frame.pack(fill=tk.X)
         ttk.Label(long_run_frame, text="时长（分钟）").grid(row=0, column=0)
         self.long_run_minutes = ttk.Spinbox(
             long_run_frame,
@@ -230,7 +265,11 @@ class Rs04CanPanel(tk.Toplevel):
         )
         self.long_run_start_button.grid(row=0, column=3, padx=(0, 6))
         self.long_run_stop_button = ttk.Button(
-            long_run_frame, text="停止", command=self.stop_long_run, state=tk.DISABLED
+            long_run_frame,
+            text="停止",
+            command=self.stop_long_run,
+            state=tk.DISABLED,
+            style="Stop.TButton",
         )
         self.long_run_stop_button.grid(row=0, column=4, padx=(0, 6))
         ttk.Button(long_run_frame, text="导出 CSV", command=self.export_long_run_csv).grid(
@@ -253,38 +292,102 @@ class Rs04CanPanel(tk.Toplevel):
             "最终接受结果还要同时查看 COM4 的 CAN_PARAM accepted/rejected；"
             "长稳功能只发送类型 17 参数读取，不发送任何写入或运动报文。"
         )
-        ttk.Label(outer, text=warning, foreground="#9b5a00", wraplength=930).pack(
+        ttk.Label(outer, text=warning, foreground=WARNING_TEXT, wraplength=930).pack(
             fill=tk.X, pady=(10, 0)
         )
 
-        log_frame = ttk.LabelFrame(outer, text="CAN 收发记录", padding=8)
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        detail_bar = ttk.Frame(outer)
+        detail_bar.pack(fill=tk.X, pady=(8, 0))
+        ttk.Checkbutton(
+            detail_bar,
+            text="显示原始通信日志",
+            variable=self.show_log_var,
+            command=self._toggle_log,
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            detail_bar, text="日志包含 CAN ID、原始数据和 USB-CAN AT 字节。"
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
+        self.log_frame = ttk.LabelFrame(outer, text="CAN 收发记录", padding=8)
         self.log = tk.Text(
-            log_frame,
+            self.log_frame,
             wrap=tk.NONE,
             state=tk.DISABLED,
             font=("Consolas", 10),
-            background="#101418",
-            foreground="#d9e2ea",
+            background=LOG_BACKGROUND,
+            foreground=LOG_FOREGROUND,
         )
-        y_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log.yview)
-        x_scroll = ttk.Scrollbar(log_frame, orient=tk.HORIZONTAL, command=self.log.xview)
+        y_scroll = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log.yview)
+        x_scroll = ttk.Scrollbar(self.log_frame, orient=tk.HORIZONTAL, command=self.log.xview)
         self.log.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         self.log.grid(row=0, column=0, sticky="nsew")
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
-        log_frame.rowconfigure(0, weight=1)
-        log_frame.columnconfigure(0, weight=1)
-        self.log.tag_configure("tx", foreground="#76d7ff")
-        self.log.tag_configure("rx", foreground="#d9e2ea")
-        self.log.tag_configure("event", foreground="#ffe08a")
-        self.log.tag_configure("error", foreground="#ff7777")
+        self.log_frame.rowconfigure(0, weight=1)
+        self.log_frame.columnconfigure(0, weight=1)
+        self.log.tag_configure("tx", foreground=LOG_TX)
+        self.log.tag_configure("rx", foreground=LOG_FOREGROUND)
+        self.log.tag_configure("event", foreground=LOG_EVENT)
+        self.log.tag_configure("error", foreground=LOG_ERROR)
 
-    @staticmethod
-    def _parameter_label(index: int) -> str:
+    def _ui(self, text: object) -> str:
+        return localize_legacy(text, self.language_var.get())
+
+    def _translate_widget_tree(self) -> None:
+        language = self.language_var.get()
+
+        def visit(widget: tk.Misc) -> None:
+            try:
+                current = str(widget.cget("text"))
+            except tk.TclError:
+                current = ""
+            if not hasattr(widget, "_easymotor_source_text"):
+                widget._easymotor_source_text = current
+            source = widget._easymotor_source_text
+            if source:
+                try:
+                    widget.configure(text=localize_legacy(source, language))
+                except tk.TclError:
+                    pass
+            for child in widget.winfo_children():
+                visit(child)
+
+        visit(self)
+
+    def refresh_language(self) -> None:
+        self.title(self._ui("CAN 电机协议工具"))
+        for value in vars(self).values():
+            if isinstance(value, LocalizedStringVar):
+                value.refresh_language()
+        self._translate_widget_tree()
+        self.feature_tabs.tab(self.parameter_tab, text=self._ui("参数管理"))
+        self.feature_tabs.tab(self.endurance_tab, text=self._ui("长稳测试"))
+        self.feature_tabs.tab(self.diagnostics_tab, text=self._ui("高级诊断"))
+        selected = self.parameter_var.get()
+        selected_index = selected[2:6] if selected.startswith("0x") else None
+        labels = [self._parameter_label(item.index) for item in PARAMETERS]
+        self.parameter_combo.configure(values=labels)
+        if selected_index is not None:
+            match = next((label for label in labels if label[2:6] == selected_index), None)
+            if match is not None:
+                self.parameter_var.set(match)
+        self.connect_button.configure(
+            text=self._ui("断开" if self.connection is not None else "连接")
+        )
+        self._rerender_log()
+
+    def _toggle_log(self) -> None:
+        if self.show_log_var.get():
+            self.log_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+            self.geometry("980x820")
+        else:
+            self.log_frame.pack_forget()
+            self.geometry("980x650")
+
+    def _parameter_label(self, index: int) -> str:
         parameter = PARAMETER_BY_INDEX[index]
         access = "安全可写" if parameter.writable else "只读"
-        return f"0x{index:04X}  {parameter.name}  [{parameter.kind}, {access}]"
+        return f"0x{index:04X}  {parameter.name}  [{parameter.kind}, {self._ui(access)}]"
 
     def _selected_parameter(self):
         text = self.parameter_var.get().strip()
@@ -355,10 +458,10 @@ class Rs04CanPanel(tk.Toplevel):
         self.decoder = AtFrameDecoder()
         self.reader_stop.clear()
         self.reader_thread = threading.Thread(
-            target=self._reader_loop, name="rs04-usb-can", daemon=True
+            target=self._reader_loop, name="motor-usb-can", daemon=True
         )
         self.reader_thread.start()
-        self.connect_button.configure(text="断开")
+        self.connect_button.configure(text=self._ui("断开"))
         self.connection_var.set(f"USB-CAN：已连接 {port}")
         self._append_log("event", f"已连接 {port} @ {USB_CAN_BAUD}\n")
 
@@ -376,7 +479,7 @@ class Rs04CanPanel(tk.Toplevel):
                 pass
         self.pending_verification.clear()
         self.pending_rejection.clear()
-        self.connect_button.configure(text="连接")
+        self.connect_button.configure(text=self._ui("连接"))
         self.connection_var.set("USB-CAN：未连接")
         self._append_log("event", "USB-CAN 已断开\n")
 
@@ -620,13 +723,13 @@ class Rs04CanPanel(tk.Toplevel):
         if not self.long_run.records:
             messagebox.showinfo("没有长稳数据", "请先运行长稳测试。", parent=self)
             return
-        default_name = datetime.now().strftime("rs04_can_long_run_%Y%m%d_%H%M%S.csv")
+        default_name = datetime.now().strftime("can_motor_long_run_%Y%m%d_%H%M%S.csv")
         path = filedialog.asksaveasfilename(
             parent=self,
-            title="导出 CAN 长稳记录",
+            title=self._ui("导出 CAN 长稳记录"),
             defaultextension=".csv",
             initialfile=default_name,
-            filetypes=(("CSV 文件", "*.csv"), ("所有文件", "*.*")),
+            filetypes=((self._ui("CSV 文件"), "*.csv"), (self._ui("所有文件"), "*.*")),
         )
         if not path:
             return
@@ -810,8 +913,19 @@ class Rs04CanPanel(tk.Toplevel):
         if not self.winfo_exists():
             return
         stamp = datetime.now().strftime("[%H:%M:%S.%f]")[:-3]
+        self._log_entries.append((tag, stamp, text))
         self.log.configure(state=tk.NORMAL)
-        self.log.insert(tk.END, f"{stamp} {text}", tag)
+        self.log.insert(tk.END, f"{stamp} {self._ui(text)}", tag)
+        self.log.see(tk.END)
+        self.log.configure(state=tk.DISABLED)
+
+    def _rerender_log(self) -> None:
+        if not hasattr(self, "log"):
+            return
+        self.log.configure(state=tk.NORMAL)
+        self.log.delete("1.0", tk.END)
+        for tag, stamp, source in self._log_entries:
+            self.log.insert(tk.END, f"{stamp} {self._ui(source)}", tag)
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 

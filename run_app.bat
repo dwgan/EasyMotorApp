@@ -24,10 +24,10 @@ if not defined PYTHON_EXE (
     exit /b 1
 )
 
-%PYTHON_EXE% "%~dp0robot_joint_app.py"
+%PYTHON_EXE% "%~dp0easymotor_app.py"
 if errorlevel 1 (
     echo.
-    echo [ERROR] RobotJointApp failed to start.
+    echo [ERROR] EasyMotor failed to start.
     pause
     exit /b 1
 )

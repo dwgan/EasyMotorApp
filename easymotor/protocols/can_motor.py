@@ -1,9 +1,8 @@
-"""RobStride RS04 private CAN protocol and official USB-CAN AT framing.
+"""Official motor CAN protocol and official USB-CAN AT framing.
 
-Only the non-motion messages needed by the current bench stage are exposed:
-device enumeration (type 0), single-parameter read (type 17), and the small
-firmware-approved write subset (type 18).  Motion, enable, zeroing, and CAN-ID
-change builders intentionally do not live in this module.
+The motion surface deliberately exposes only the already bench-validated
+velocity path: type 3 enable, type 1 velocity refresh, type 2 feedback, and
+type 4 stop. Position PD and torque feed-forward are always encoded as zero.
 """
 
 from __future__ import annotations
@@ -17,6 +16,20 @@ CAN_ID_MASK: Final = 0x1FFFFFFF
 AT_HEADER: Final = b"AT"
 AT_TAIL: Final = b"\r\n"
 AT_EXTENDED_FLAG: Final = 0x04
+POSITION_MIN_RAD: Final = -12.57
+POSITION_MAX_RAD: Final = 12.57
+VELOCITY_MIN_RAD_S: Final = -50.0
+VELOCITY_MAX_RAD_S: Final = 50.0
+TORQUE_MIN_NM: Final = -120.0
+TORQUE_MAX_NM: Final = 120.0
+KP_MAX: Final = 5000.0
+KD_MAX: Final = 100.0
+DEFAULT_REDUCTION: Final = 9.0
+DEMO_MAX_MOTOR_RPM: Final = 20
+
+MODE_RESET: Final = 0
+MODE_CALIBRATING: Final = 1
+MODE_MOTOR: Final = 2
 
 
 @dataclass(frozen=True)
@@ -40,6 +53,24 @@ class Parameter:
     minimum: int | float | None = None
     maximum: int | float | None = None
     allowed_values: tuple[int | float, ...] = ()
+
+
+@dataclass(frozen=True)
+class MotorFeedback:
+    node_id: int
+    mode: int
+    faults: int
+    position_rad: float
+    velocity_rad_s: float
+    torque_nm: float
+    temperature_c: float
+
+
+@dataclass(frozen=True)
+class FaultReport:
+    node_id: int
+    fault: int
+    warning: int
 
 
 PARAMETERS: Final = (
@@ -116,6 +147,58 @@ def split_id(arbitration_id: int) -> tuple[int, int, int]:
 
 def build_device_id_request(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
     return CanFrame(make_id(0, host_id, node_id), bytes(8))
+
+
+def build_enable(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
+    """Build the official type-3 enable/alignment request."""
+    return CanFrame(make_id(3, host_id, node_id), bytes(8))
+
+
+def build_stop(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
+    """Build the official type-4 ramped stop request (Byte0 bit0 clear)."""
+    return CanFrame(make_id(4, host_id, node_id), bytes(8))
+
+
+def build_active_report(
+    enabled: bool, node_id: int = 0x7F, host_id: int = 0xFD
+) -> CanFrame:
+    """Enable or disable official type-2 periodic feedback using type 24."""
+    return CanFrame(make_id(24, host_id, node_id), bytes(7) + bytes((int(enabled),)))
+
+
+def build_velocity_control(
+    motor_rpm: int,
+    node_id: int = 0x7F,
+    *,
+    reduction: float = DEFAULT_REDUCTION,
+) -> CanFrame:
+    """Build the validated type-1 velocity-only command.
+
+    ``motor_rpm`` is motor-shaft speed, matching the RS485 ``speed`` command
+    and the beginner presets. The wire protocol carries load-side rad/s.
+    Position, Kp, Kd, and torque feed-forward stay at physical zero so this
+    helper cannot accidentally activate an unimplemented control path.
+    """
+    if not 0 <= node_id <= 0x7F:
+        raise ValueError("motor node ID must be 0..127")
+    if isinstance(motor_rpm, bool) or not isinstance(motor_rpm, int):
+        raise ValueError("motor rpm must be an integer")
+    if not -DEMO_MAX_MOTOR_RPM <= motor_rpm <= DEMO_MAX_MOTOR_RPM:
+        raise ValueError(
+            f"motor rpm must be -{DEMO_MAX_MOTOR_RPM}..{DEMO_MAX_MOTOR_RPM}"
+        )
+    if reduction <= 0.0:
+        raise ValueError("reduction must be positive")
+    output_rad_s = motor_rpm / reduction * (2.0 * 3.141592653589793 / 60.0)
+    torque_raw = _encode_u16(0.0, TORQUE_MIN_NM, TORQUE_MAX_NM)
+    payload = struct.pack(
+        ">HHHH",
+        _encode_u16(0.0, POSITION_MIN_RAD, POSITION_MAX_RAD),
+        _encode_u16(output_rad_s, VELOCITY_MIN_RAD_S, VELOCITY_MAX_RAD_S),
+        _encode_u16(0.0, 0.0, KP_MAX),
+        _encode_u16(0.0, 0.0, KD_MAX),
+    )
+    return CanFrame(make_id(1, torque_raw, node_id), payload)
 
 
 def build_parameter_read(index: int, node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
@@ -210,6 +293,37 @@ def parse_parameter_response(
     return index, unpack_value(parameter.kind, frame.data[4:8])
 
 
+def parse_feedback(frame: CanFrame, host_id: int = 0xFD) -> MotorFeedback | None:
+    comm_type, data2, target = split_id(frame.arbitration_id)
+    if comm_type != 2 or target != host_id or len(frame.data) != 8:
+        return None
+    flags = (data2 >> 8) & 0xFF
+    node_id = data2 & 0xFF
+    position_raw, velocity_raw, torque_raw, temperature_raw = struct.unpack(
+        ">HHHH", frame.data
+    )
+    return MotorFeedback(
+        node_id=node_id,
+        mode=(flags >> 6) & 0x03,
+        faults=flags & 0x3F,
+        position_rad=_decode_u16(position_raw, POSITION_MIN_RAD, POSITION_MAX_RAD),
+        velocity_rad_s=_decode_u16(velocity_raw, VELOCITY_MIN_RAD_S, VELOCITY_MAX_RAD_S),
+        torque_nm=_decode_u16(torque_raw, TORQUE_MIN_NM, TORQUE_MAX_NM),
+        temperature_c=temperature_raw / 10.0,
+    )
+
+
+def parse_fault_report(frame: CanFrame, host_id: int = 0xFD) -> FaultReport | None:
+    comm_type, data2, target = split_id(frame.arbitration_id)
+    if comm_type != 21 or target != host_id or len(frame.data) != 8:
+        return None
+    return FaultReport(
+        node_id=data2 & 0xFF,
+        fault=int.from_bytes(frame.data[0:4], "little"),
+        warning=int.from_bytes(frame.data[4:8], "little"),
+    )
+
+
 def encode_at_frame(frame: CanFrame) -> bytes:
     """Wrap a frame for the official RobStride USB-CAN module.
 
@@ -270,3 +384,12 @@ def _require_known_parameter(index: int) -> Parameter:
         return PARAMETER_BY_INDEX[index]
     except KeyError as exc:
         raise ValueError(f"unknown RS04 parameter index 0x{index:04X}") from exc
+
+
+def _encode_u16(value: float, minimum: float, maximum: float) -> int:
+    clamped = min(max(value, minimum), maximum)
+    return min(65535, int(((clamped - minimum) / (maximum - minimum)) * 65535.0 + 0.5))
+
+
+def _decode_u16(raw: int, minimum: float, maximum: float) -> float:
+    return minimum + (raw / 65535.0) * (maximum - minimum)
