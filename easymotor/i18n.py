@@ -396,6 +396,7 @@ _REPLACE_EN: Final = (
 _TEXT: Final = {
     "en": {
         "app_title": "EasyMotor",
+        "copyright": "Copyright © 2026 STMicroelectronics Shenzhen R&D Co., Ltd.",
         "language": "Language",
         "english": "English",
         "chinese": "中文",
@@ -449,6 +450,7 @@ _TEXT: Final = {
     },
     "zh_CN": {
         "app_title": "EasyMotor",
+        "copyright": "版权所有 © 2026 意法半导体研发（深圳）有限公司",
         "language": "语言",
         "english": "English",
         "chinese": "中文",

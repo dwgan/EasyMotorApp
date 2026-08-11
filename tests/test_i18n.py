@@ -16,6 +16,14 @@ USER_TEXT_SOURCES = (
 class TranslationTests(unittest.TestCase):
     def test_product_shell_has_both_languages(self):
         self.assertEqual(tr("en", "app_title"), "EasyMotor")
+        self.assertEqual(
+            tr("en", "copyright"),
+            "Copyright © 2026 STMicroelectronics Shenzhen R&D Co., Ltd.",
+        )
+        self.assertEqual(
+            tr("zh_CN", "copyright"),
+            "版权所有 © 2026 意法半导体研发（深圳）有限公司",
+        )
         self.assertEqual(tr("en", "engineer_mode"), "Advanced")
         self.assertEqual(tr("zh_CN", "engineer_mode"), "高级模式")
 

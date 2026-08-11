@@ -72,6 +72,7 @@ from easymotor.theme import (
     LOG_EVENT,
     LOG_FOREGROUND,
     LOG_TX,
+    MUTED_TEXT,
     WARNING_TEXT,
     WAVE_BACKGROUND,
     WAVE_GRID,
@@ -452,6 +453,17 @@ class EasyMotorApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
+        self.copyright_var = tk.StringVar(
+            value=tr(self.language_var.get(), "copyright")
+        )
+        ttk.Label(
+            self,
+            textvariable=self.copyright_var,
+            foreground=MUTED_TEXT,
+            anchor=tk.E,
+            padding=(12, 4),
+        ).pack(side=tk.BOTTOM, fill=tk.X)
+
         self.demo_view = DemoView(
             self,
             port_var=self.port_var,
@@ -1055,6 +1067,7 @@ class EasyMotorApp(tk.Tk):
 
     def on_language_changed(self) -> None:
         self.title(window_title(tr(self.language_var.get(), "app_title")))
+        self.copyright_var.set(tr(self.language_var.get(), "copyright"))
         self._refresh_localized_vars()
         self.connection_var.set(
             (
