@@ -1,6 +1,4 @@
 param(
-    [string]$Version = "",
-
     [string]$Name = "EasyMotor",
 
     [string]$CompanyName = "EasyMotor",
@@ -33,7 +31,7 @@ if ($Help) {
     Write-Host "EasyMotor one-file Windows release builder"
     Write-Host ""
     Write-Host "Usage:"
-    Write-Host "  .\build_easymotor_release.ps1 [-Clean] [-Version 1.2.3] [-WriteChecksum]"
+    Write-Host "  .\build_easymotor_release.ps1 [-Clean] [-WriteChecksum]"
     Write-Host ""
     Write-Host "The default output is release\EasyMotor_v<version>_win-<arch>.exe."
     Write-Host "Dependencies and PyInstaller are installed automatically unless -NoInstallDependencies is used."
@@ -129,11 +127,9 @@ try {
         Invoke-Python @("-c", "import serial, PyInstaller")
     }
 
-    if ([string]::IsNullOrWhiteSpace($Version)) {
-        $Version = Invoke-PythonCapture @(
-            "-c", "from easymotor.version import __version__; print(__version__)"
-        )
-    }
+    $Version = Invoke-PythonCapture @(
+        "-c", "from easymotor.version import __version__; print(__version__)"
+    )
     if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
         throw "Version must contain three or four numeric parts, for example 1.2.3 or 1.2.3.4."
     }
@@ -174,7 +170,6 @@ try {
     $workPath = Join-Path $buildRoot "work"
     $specPath = Join-Path $buildRoot "spec"
     $versionFile = Join-Path $buildRoot "EasyMotor_version_info.txt"
-    $runtimeVersionHook = Join-Path $buildRoot "EasyMotor_runtime_version.py"
     $targetExe = Join-Path $outputPath "$artifactStem.exe"
     $checksumPath = "$targetExe.sha256"
 
@@ -226,11 +221,6 @@ VSVersionInfo(
 )
 "@
     Set-Content -LiteralPath $versionFile -Value $versionResource -Encoding UTF8
-    Set-Content -LiteralPath $runtimeVersionHook -Encoding ASCII -Value @(
-        "import os",
-        "os.environ['EASYMOTOR_BUILD_VERSION'] = '$Version'"
-    )
-
     if (-not $SkipTests) {
         Write-Host "[INFO] Running software tests..." -ForegroundColor Cyan
         Invoke-Python @("-m", "unittest", "discover", "-s", "tests", "-v")
@@ -245,7 +235,6 @@ VSVersionInfo(
         "--name", $artifactStem,
         "--icon", $iconPath,
         "--version-file", $versionFile,
-        "--runtime-hook", $runtimeVersionHook,
         "--add-data", $addData,
         "--paths", $scriptDir,
         "--hidden-import", "serial.tools.list_ports",

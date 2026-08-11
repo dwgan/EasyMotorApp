@@ -33,14 +33,14 @@ PyInstaller 的 `--onefile --windowed` 模式生成一个无需 Python 环境的
 release\EasyMotor_v1.0.0_win-x64.exe
 ```
 
-版本号默认读取 `easymotor/version.py`，同时写入软件标题、EXE 文件名和 Windows 文件属性中的
+版本号统一读取 `easymotor/version.py`，同时写入软件标题、EXE 文件名和 Windows 文件属性中的
 FileVersion、ProductVersion、ProductName、FileDescription、CompanyName 等字段。正式发布时应先修改
-`easymotor/version.py`；临时构建也可使用 `-Version 1.2.3`，脚本会通过运行时钩子保证界面标题与
+`VERSION`；打包脚本不接受独立版本覆盖，以保证源码、界面和 EXE 元数据始终一致。
 EXE 元数据一致。常用选项：
 
 ```powershell
 # 生成指定版本，并额外输出 SHA-256 文件
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_release.ps1 -Clean -Version 1.2.3 -WriteChecksum
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_release.ps1 -Clean -WriteChecksum
 
 # 已自行安装依赖时跳过 pip
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_release.ps1 -Clean -NoInstallDependencies
