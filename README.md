@@ -10,7 +10,7 @@ EasyMotor 是基于 Python Tkinter 和 pyserial 的电机演示与工程调试�
 PATH" 和 Tcl/Tk 组件。
 
 ```powershell
-cd D:\Workspace\RobotJointG5\RobotJointApp_ICMU150
+cd <EasyMotor repository>
 python -m pip install -r requirements.txt
 python easymotor_app.py
 ```
@@ -67,8 +67,8 @@ easymotor-update.json
 
 客户端会同时校验清单、GitHub asset digest、文件长度、SHA-256、PE x64 架构和 Windows 版本资源。
 安装前必须停止电机并断开通信；替换程序在 EasyMotor 退出后运行，需要时申请 UAC，并在新版本未能
-健康启动时恢复旧 EXE。发布端由独立 `publisher` orphan branch 中的 EasyMotor Publisher 管理，客户
-软件中不包含 GitHub Token。
+健康启动时恢复旧 EXE。发布端由独立的 EasyMotor Publisher 工程管理；两个工程不共享 Git 仓库、
+Python 包或构建目录，客户软件中不包含 GitHub Token。
 
 ## 两种使用模式
 
@@ -219,10 +219,11 @@ CAN 参数窗口提供独立的长稳区，只以 100 ms 周期轮询 Type 17 �
   COM 口。参数写入前必须保持电机处于 IDLE/RESET。
 - 不要把关机当作急停；功率测试必须保留独立断电手段。
 
-## 与 RobotJointApp（通用版）的关系
+## 独立工程说明
 
-`RobotJointApp` 与 `RobotJointApp_ICMU150` 曾是完全相同的副本；本目录
-现在是按当前双 AS5047P + iC-MU150 共用命令面维护的版本。五套 IAR
+本目录是完整、可单独克隆和构建的 EasyMotor Git 仓库，不依赖父目录或
+其他 RobotJointApp 工作区。工程按当前双 AS5047P + iC-MU150 共用命令面
+维护。五套 IAR
 配置（FreeRun / eRob80H50 / Bringup / ClosedLoop / Alignment）共用同一
 UART5 控制台协议；Alignment 配置下 `start/iq/speed` 被禁用，仅
 `align/stop/status/faultack`。
