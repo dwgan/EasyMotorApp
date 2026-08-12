@@ -17,6 +17,20 @@ _HAN_RE = re.compile(r"[\u3400-\u9fff]")
 # text should use ``tr`` keys; this map keeps legacy diagnostics bilingual
 # without altering protocol tokens, numeric values, or raw firmware frames.
 _EXACT_EN: Final = {
+    "RS485 调试连接": "RS485 Debug Connection",
+    "通信连接": "Communication Connections",
+    "CAN 运动连接": "CAN Motion Connection",
+    "RS485 调试端口": "RS485 Debug Port",
+    "端口冲突": "Port conflict",
+    "CAN 和 RS485 调试必须选择两个不同的串口。请为 RS485 调试选择另一个端口。": "CAN and RS485 Debug must use two different COM ports. Select the other port for RS485 Debug.",
+    "请先连接 RS485 调试端口。CAN 运动连接可以保持在线。": "Connect the RS485 Debug port first. The CAN motion connection can remain online.",
+    "CAN 安全演示控制": "CAN Safe Demo Control",
+    "速度档位": "Speed preset",
+    "正转": "Forward",
+    "反转": "Reverse",
+    "一直转（直到停止）": "Run continuously (until STOP)",
+    "打开波形窗口": "Open Waveform Window",
+    "未勾选时单次运行 5 秒；控制仍受 CAN 看门狗和固件安全门限保护。": "Without continuous mode, each run lasts 5 seconds. The CAN watchdog and firmware safety limits remain active.",
     "MCI: 未知": "MCI: Unknown",
     "TORQUE: 未知": "TORQUE: Unknown",
     "Stage-I 探测: 空闲": "Stage-I probe: Idle",
@@ -470,8 +484,8 @@ _TEXT: Final = {
         "demo_unsafe": "The current motor state is not safe for a demo. Stop and check faults.",
         "stop_first": "Stop the motor first",
         "advanced_confirm_title": "Open Advanced mode",
-        "advanced_confirm": "Advanced mode includes manual current, diagnostics, waveforms, CAN parameters, and logs. Safety limits remain active. Continue?",
-        "disconnect_for_advanced": "Disconnect the CAN demo before opening Advanced mode. Advanced RS485 tools and the CAN parameter window own their ports independently.",
+        "advanced_confirm": "Advanced mode includes diagnostics, waveforms, CAN parameters, and logs. CAN motion may remain connected; RS485 Debug is read-only. Continue?",
+        "disconnect_for_advanced": "CAN motion and RS485 Debug can remain connected at the same time when they use different COM ports.",
     },
     "zh_CN": {
         "app_title": "EasyMotor",
@@ -549,8 +563,8 @@ _TEXT: Final = {
         "demo_unsafe": "电机当前状态不允许演示，请先停止并确认设备无故障。",
         "stop_first": "请先停止电机",
         "advanced_confirm_title": "进入高级模式",
-        "advanced_confirm": "高级模式包含手动电流、诊断、波形、CAN 参数和日志；安全限制仍然有效。确认进入？",
-        "disconnect_for_advanced": "进入高级模式前请断开 CAN 演示连接。高级 RS485 工具和 CAN 参数窗口分别独占自己的串口。",
+        "advanced_confirm": "高级模式包含诊断、波形、CAN 参数和日志。CAN 运动连接可以保持在线，RS485 Debug 仅提供只读诊断。确认进入？",
+        "disconnect_for_advanced": "CAN 运动连接和 RS485 Debug 使用不同串口时可以同时在线。",
     },
 }
 

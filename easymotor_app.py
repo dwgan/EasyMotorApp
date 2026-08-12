@@ -48,6 +48,9 @@ except ImportError as exc:  # Give a useful GUI-free error when launched directl
     ) from exc
 
 from easymotor.branding import apply_window_icon, configure_windows_app_id
+from easymotor.core.safety_policy import (
+    DEMO_SPEED_PRESETS_RPM,
+)
 from easymotor.features.can_tool import CanToolWindow
 from easymotor.features.demo import DemoView
 from easymotor.features.update_dialog import UpdateDialog
@@ -121,6 +124,17 @@ ENGINEER_TEXT_EN = {
     "工程师模式": "Advanced Engineering",
     "返回演示模式": "Back to Demo",
     "串口连接": "RS485 Connection",
+    "RS485 调试连接": "RS485 Debug Connection",
+    "通信连接": "Communication Connections",
+    "CAN 运动连接": "CAN Motion Connection",
+    "RS485 调试端口": "RS485 Debug Port",
+    "CAN 安全演示控制": "CAN Safe Demo Control",
+    "速度档位": "Speed preset",
+    "正转": "Forward",
+    "反转": "Reverse",
+    "一直转（直到停止）": "Run continuously (until STOP)",
+    "打开波形窗口": "Open Waveform Window",
+    "未勾选时单次运行 5 秒；控制仍受 CAN 看门狗和固件安全门限保护。": "Without continuous mode, each run lasts 5 seconds. The CAN watchdog and firmware safety limits remain active.",
     "端口": "COM port",
     "刷新": "Refresh",
     "连接": "Connect",
@@ -378,8 +392,13 @@ class EasyMotorApp(tk.Tk):
         self._enc_health_fragment = ""
 
         self.port_var = tk.StringVar()
+        self.debug_port_var = tk.StringVar()
         localized_var = lambda value="": LocalizedStringVar(self, self.language_var.get, value)
         self.connection_var = localized_var(tr(DEFAULT_LANGUAGE, "not_connected"))
+        self.debug_connection_var = localized_var(tr(DEFAULT_LANGUAGE, "not_connected"))
+        self.engineer_can_status_var = localized_var(tr(DEFAULT_LANGUAGE, "connect_first"))
+        self.engineer_can_speed_var = tk.IntVar(value=DEMO_SPEED_PRESETS_RPM[0])
+        self.engineer_can_continuous_var = tk.BooleanVar(value=False)
         self.state_var = localized_var("MCI: 未知")
         self.torque_var = localized_var("TORQUE: 未知")
         self.sequence_var = localized_var("Stage-I 探测: 空闲")
@@ -510,25 +529,43 @@ class EasyMotorApp(tk.Tk):
             engineer_header, text="返回演示模式", command=self.show_demo_mode
         ).pack(side=tk.RIGHT)
 
-        connection = ttk.LabelFrame(outer, text="串口连接", padding=10)
+        connection = ttk.LabelFrame(outer, text="通信连接", padding=10)
         connection.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(connection, text="端口").grid(row=0, column=0, padx=(0, 6))
-        self.port_combo = ttk.Combobox(
+        ttk.Label(connection, text="CAN 运动连接").grid(row=0, column=0, padx=(0, 6))
+        self.advanced_can_port_combo = ttk.Combobox(
             connection, textvariable=self.port_var, width=18, state="readonly"
         )
-        self.port_combo.grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(connection, text="刷新", command=self.refresh_ports).grid(
-            row=0, column=2, padx=(0, 12)
+        self.advanced_can_port_combo.grid(row=0, column=1, padx=(0, 6))
+        self.advanced_can_refresh_button = ttk.Button(
+            connection, text="刷新", command=self.refresh_ports
         )
-        ttk.Label(connection, text=f"{BAUD_RATE:,} baud / 8N1 / RS485").grid(
-            row=0, column=3, padx=(0, 12)
-        )
-        self.connect_button = ttk.Button(
+        self.advanced_can_refresh_button.grid(row=0, column=2, padx=(0, 12))
+        self.advanced_can_connect_button = ttk.Button(
             connection, text="连接", command=self.toggle_connection
         )
-        self.connect_button.grid(row=0, column=4)
+        self.advanced_can_connect_button.grid(row=0, column=3)
         ttk.Label(connection, textvariable=self.connection_var).grid(
-            row=0, column=5, padx=(12, 0)
+            row=0, column=4, columnspan=2, padx=(12, 0), sticky="w"
+        )
+        ttk.Label(connection, text="RS485 调试端口").grid(
+            row=1, column=0, padx=(0, 6), pady=(6, 0)
+        )
+        self.port_combo = ttk.Combobox(
+            connection, textvariable=self.debug_port_var, width=18, state="readonly"
+        )
+        self.port_combo.grid(row=1, column=1, padx=(0, 6), pady=(6, 0))
+        ttk.Button(connection, text="刷新", command=self.refresh_ports).grid(
+            row=1, column=2, padx=(0, 12), pady=(6, 0)
+        )
+        ttk.Label(connection, text=f"{BAUD_RATE:,} baud / 8N1 / RS485").grid(
+            row=1, column=3, padx=(0, 12), pady=(6, 0)
+        )
+        self.connect_button = ttk.Button(
+            connection, text="连接", command=self.toggle_debug_connection
+        )
+        self.connect_button.grid(row=1, column=4, pady=(6, 0))
+        ttk.Label(connection, textvariable=self.debug_connection_var).grid(
+            row=1, column=5, padx=(12, 0), pady=(6, 0)
         )
         connection.columnconfigure(6, weight=1)
 
@@ -596,6 +633,73 @@ class EasyMotorApp(tk.Tk):
             row=6, column=0, sticky="w", pady=(4, 0)
         )
         motion_frame.columnconfigure(0, weight=1)
+
+        waveform_frame = ttk.LabelFrame(
+            self.engineer_monitor_tab, text="波形窗口", padding=10
+        )
+        waveform_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(
+            waveform_frame, text="波形窗口", command=self.open_wave_popup
+        ).grid(row=0, column=0, padx=(0, 12), sticky="w")
+        ttk.Label(waveform_frame, textvariable=self.wave_status_var).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Label(
+            waveform_frame,
+            text="波形流期间日志与波形并行显示；可导出为文本文件。",
+        ).grid(row=0, column=2, padx=(20, 0), sticky="w")
+        waveform_frame.columnconfigure(3, weight=1)
+
+        can_motion = ttk.LabelFrame(
+            self.engineer_can_tab, text="CAN 安全演示控制", padding=10
+        )
+        can_motion.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Label(can_motion, textvariable=self.engineer_can_status_var).grid(
+            row=0, column=0, columnspan=8, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(can_motion, text="速度档位").grid(
+            row=1, column=0, padx=(0, 6), sticky="w"
+        )
+        self.engineer_can_speed_buttons = []
+        for column, speed in enumerate(DEMO_SPEED_PRESETS_RPM, start=1):
+            button = ttk.Radiobutton(
+                can_motion,
+                text=f"{speed} rpm",
+                variable=self.engineer_can_speed_var,
+                value=speed,
+            )
+            button.grid(row=1, column=column, padx=4)
+            self.engineer_can_speed_buttons.append(button)
+        self.engineer_can_forward_button = ttk.Button(
+            can_motion, text="正转", command=lambda: self._start_engineer_can_run(1)
+        )
+        self.engineer_can_forward_button.grid(row=1, column=4, padx=(18, 4))
+        self.engineer_can_stop_button = ttk.Button(
+            can_motion, text="停止", command=self.stop_motor, style="Stop.TButton"
+        )
+        self.engineer_can_stop_button.grid(row=1, column=5, padx=4)
+        self.engineer_can_reverse_button = ttk.Button(
+            can_motion, text="反转", command=lambda: self._start_engineer_can_run(-1)
+        )
+        self.engineer_can_reverse_button.grid(row=1, column=6, padx=4)
+        self.engineer_can_wave_button = ttk.Button(
+            can_motion, text="打开波形窗口", command=self.open_wave_popup
+        )
+        self.engineer_can_wave_button.grid(row=1, column=7, padx=(18, 0))
+        self.engineer_can_continuous_check = ttk.Checkbutton(
+            can_motion,
+            text="一直转（直到停止）",
+            variable=self.engineer_can_continuous_var,
+        )
+        self.engineer_can_continuous_check.grid(
+            row=2, column=1, columnspan=3, sticky="w", pady=(8, 0)
+        )
+        ttk.Label(
+            can_motion,
+            text="未勾选时单次运行 5 秒；控制仍受 CAN 看门狗和固件安全门限保护。",
+            foreground=WARNING_TEXT,
+        ).grid(row=2, column=4, columnspan=4, sticky="w", padx=(18, 0), pady=(8, 0))
+        can_motion.columnconfigure(8, weight=1)
 
         can_frame = ttk.LabelFrame(
             self.engineer_can_tab,
@@ -874,6 +978,12 @@ class EasyMotorApp(tk.Tk):
         self.connect_button.configure(
             text=tr(
                 self.language_var.get(),
+                "disconnect" if self.serial_port is not None else "connect",
+            )
+        )
+        self.advanced_can_connect_button.configure(
+            text=tr(
+                self.language_var.get(),
                 "disconnect" if self.connected else "connect",
             )
         )
@@ -912,13 +1022,6 @@ class EasyMotorApp(tk.Tk):
                 value.refresh_language()
 
     def show_demo_mode(self, force: bool = False) -> None:
-        if not force and self._motor_activity_active():
-            messagebox.showwarning(
-                "请先停止电机",
-                "电机或测试仍在运行。请先点击停止，确认设备回到待机后再切换模式。",
-                parent=self,
-            )
-            return
         self.engineer_view.pack_forget()
         self.demo_view.pack(fill=tk.BOTH, expand=True)
         self.app_mode = "demo"
@@ -927,20 +1030,6 @@ class EasyMotorApp(tk.Tk):
         self._render_demo_view()
 
     def show_engineer_mode(self) -> None:
-        if self._motor_activity_active():
-            messagebox.showwarning(
-                "请先停止电机",
-                "进入工程师模式前必须先停止当前运行并确认设备回到待机。",
-                parent=self,
-            )
-            return
-        if self.connected and self.active_interface == "can":
-            messagebox.showwarning(
-                tr(self.language_var.get(), "stop_first"),
-                tr(self.language_var.get(), "disconnect_for_advanced"),
-                parent=self,
-            )
-            return
         if not messagebox.askokcancel(
             tr(self.language_var.get(), "advanced_confirm_title"),
             tr(self.language_var.get(), "advanced_confirm"),
@@ -951,7 +1040,7 @@ class EasyMotorApp(tk.Tk):
         self.demo_view.pack_forget()
         self.engineer_view.pack(fill=tk.BOTH, expand=True)
         self.app_mode = "engineer"
-        self.engineer_notebook.select(self.engineer_control_tab)
+        self.engineer_notebook.select(self.engineer_monitor_tab)
         self.geometry("1120x760")
         self.minsize(920, 650)
 
@@ -1000,6 +1089,14 @@ class EasyMotorApp(tk.Tk):
         else:
             self._execute_demo_action(action)
         self._render_demo_view()
+
+    def _start_engineer_can_run(self, direction: int) -> None:
+        """Use the same bounded CAN demo service from the engineering CAN page."""
+        self.start_demo_run(
+            direction,
+            int(self.engineer_can_speed_var.get()),
+            bool(self.engineer_can_continuous_var.get()),
+        )
 
     def _execute_demo_action(self, action: DemoAction) -> None:
         plan = self.demo_service.plan
@@ -1064,6 +1161,28 @@ class EasyMotorApp(tk.Tk):
             stop_enabled=self.connected,
             settings_enabled=not activity,
         )
+        if hasattr(self, "engineer_can_forward_button"):
+            self.advanced_can_connect_button.configure(
+                text=tr(language, "disconnect" if self.connected else "connect"),
+                state=(tk.NORMAL if self.connected or not activity else tk.DISABLED),
+            )
+            can_port_state = (
+                "readonly" if not self.connected and not activity else tk.DISABLED
+            )
+            self.advanced_can_port_combo.configure(state=can_port_state)
+            self.advanced_can_refresh_button.configure(
+                state=tk.NORMAL if not self.connected and not activity else tk.DISABLED
+            )
+            self.engineer_can_status_var.set(text)
+            run_state = tk.NORMAL if run_enabled else tk.DISABLED
+            self.engineer_can_forward_button.configure(state=run_state)
+            self.engineer_can_reverse_button.configure(state=run_state)
+            self.engineer_can_stop_button.configure(
+                state=tk.NORMAL if self.connected else tk.DISABLED
+            )
+            self.engineer_can_continuous_check.configure(state=run_state)
+            for button in self.engineer_can_speed_buttons:
+                button.configure(state=run_state)
 
     def on_language_changed(self) -> None:
         self.title(window_title(tr(self.language_var.get(), "app_title")))
@@ -1077,6 +1196,8 @@ class EasyMotorApp(tk.Tk):
                 else tr(self.language_var.get(), "not_connected")
             )
         )
+        if self.serial_port is None:
+            self.debug_connection_var.set(tr(self.language_var.get(), "not_connected"))
         self.demo_view.rebuild()
         self.demo_view.set_ports(port.device for port in list_ports.comports())
         self._translate_engineer_widgets()
@@ -1123,20 +1244,30 @@ class EasyMotorApp(tk.Tk):
     def refresh_ports(self) -> None:
         ports = [port.device for port in list_ports.comports()]
         self.port_combo["values"] = ports
+        self.advanced_can_port_combo["values"] = ports
         self.demo_view.set_ports(ports)
         if self.port_var.get() not in ports:
             self.port_var.set(ports[0] if ports else "")
+        if self.serial_port is None and self.debug_port_var.get() not in ports:
+            available_debug_ports = [port for port in ports if port != self.port_var.get()]
+            self.debug_port_var.set(
+                available_debug_ports[0] if available_debug_ports else ""
+            )
 
     def toggle_connection(self) -> None:
         if self.connected:
-            self.disconnect()
+            self._disconnect_can()
         else:
             self.connect()
 
+    def toggle_debug_connection(self) -> None:
+        if self.serial_port is not None:
+            self._disconnect_debug()
+        else:
+            self._connect_debug()
+
     def _connection_interface(self) -> str:
-        """Use CAN for all customer motion and RS485 only for diagnostics."""
-        if self.app_mode == "engineer":
-            return "rs485"
+        """Customer motion always uses CAN, independent of the visible page."""
         return "can"
 
     def connect(self) -> None:
@@ -1147,8 +1278,28 @@ class EasyMotorApp(tk.Tk):
                 tr(self.language_var.get(), "no_port"),
             )
             return
-        if self._connection_interface() == "can":
-            self._connect_can(port)
+        self._connect_can(port)
+
+    def _connect_debug(self) -> None:
+        port = self.debug_port_var.get()
+        if not port:
+            messagebox.showwarning(
+                tr(self.language_var.get(), "no_port_title"),
+                tr(self.language_var.get(), "no_port"),
+            )
+            return
+        if self.connected and port.casefold() == self.port_var.get().casefold():
+            english = self.language_var.get() == "en"
+            messagebox.showwarning(
+                "Port conflict" if english else "端口冲突",
+                (
+                    "CAN and RS485 Debug must use two different COM ports. "
+                    "Select the other port for RS485 Debug."
+                    if english
+                    else "CAN 和 RS485 调试必须选择两个不同的串口。请为 RS485 调试选择另一个端口。"
+                ),
+                parent=self,
+            )
             return
         try:
             connection = serial.Serial(
@@ -1166,8 +1317,6 @@ class EasyMotorApp(tk.Tk):
             return
 
         self.serial_port = connection
-        self.connected = True
-        self.active_interface = "rs485"
         self.keep_sent_count = 0
         self.keep_busy_retry_count = 0
         self.keep_forced_count = 0
@@ -1182,9 +1331,9 @@ class EasyMotorApp(tk.Tk):
             target=self._reader_loop, name="robot-joint-uart", daemon=True
         )
         self.reader_thread.start()
-        self.connection_var.set(f"{port} | RS485 @ {BAUD_RATE:,}")
+        self.debug_connection_var.set(f"{port} | RS485 Debug @ {BAUD_RATE:,}")
         self.connect_button.configure(text=tr(self.language_var.get(), "disconnect"))
-        self._append_log("event", f"已连接 {port} @ {BAUD_RATE}\n")
+        self._append_log("event", f"RS485 Debug connected {port} @ {BAUD_RATE}\n")
         self._update_control_state()
         self.after(100, lambda: self.send_command("status"))
 
@@ -1236,7 +1385,7 @@ class EasyMotorApp(tk.Tk):
             transport.enumerate()
         except (serial.SerialException, OSError, RuntimeError) as exc:
             self._append_log("error", f"USB-CAN enumeration retry failed: {exc}\n")
-            self.disconnect()
+            self._disconnect_can()
             return
         if (
             not self.can_enumeration_guidance_shown
@@ -1253,23 +1402,10 @@ class EasyMotorApp(tk.Tk):
             lambda: self._retry_can_enumeration(generation),
         )
 
-    def disconnect(self) -> None:
+    def _disconnect_can(self) -> None:
         activity_before_disconnect = self._motor_activity_active()
-        if (
-            activity_before_disconnect
-            and self.active_interface == "rs485"
-            and self.serial_port is not None
-        ):
-            try:
-                self.send_command("stop", quiet=True)
-                time.sleep(0.05)
-            except Exception:
-                pass
-        self.reader_stop.set()
         self.demo_service.cancel()
         self.demo_view.reset_continuous()
-        connection = self.serial_port
-        self.serial_port = None
         can_transport = self.can_transport
         self.can_transport = None
         if can_transport is not None:
@@ -1311,6 +1447,36 @@ class EasyMotorApp(tk.Tk):
         self.can_accepted = 0
         self.can_active_report = False
         self.can_status_var.set("CAN: 未初始化")
+        self.auto_keep_var.set(False)
+        self.connection_var.set(tr(self.language_var.get(), "not_connected"))
+        self.mci_state = None
+        self.state_var.set("MCI: 未知")
+        self.torque_var.set("TORQUE: 未知")
+        self.sequence_var.set("Stage-I 探测: 空闲")
+        self._update_keepalive_label()
+        self._update_control_state()
+        self._append_log("event", "CAN motion connection disconnected\n")
+
+    def _disconnect_debug(self) -> None:
+        connection = self.serial_port
+        if connection is None:
+            return
+        reader_thread = self.reader_thread
+        self.reader_thread = None
+        if self.streaming:
+            try:
+                self.send_command("wave off", quiet=True)
+                time.sleep(0.05)
+            except Exception:
+                pass
+        self.reader_stop.set()
+        self.serial_port = None
+        try:
+            connection.close()
+        except (serial.SerialException, OSError):
+            pass
+        if reader_thread is not None and reader_thread is not threading.current_thread():
+            reader_thread.join(timeout=0.25)
         self.streaming = False
         self._wave_off_deadline = None
         self._close_wave_csv()
@@ -1318,21 +1484,15 @@ class EasyMotorApp(tk.Tk):
             buf.clear()
         self._wave_stats_entries.clear()
         self.wave_status_var.set("波形: 停止")
-        self.auto_keep_var.set(False)
-        if connection is not None:
-            try:
-                connection.close()
-            except serial.SerialException:
-                pass
-        self.connection_var.set(tr(self.language_var.get(), "not_connected"))
+        self.debug_connection_var.set(tr(self.language_var.get(), "not_connected"))
         self.connect_button.configure(text=tr(self.language_var.get(), "connect"))
-        self.mci_state = None
-        self.state_var.set("MCI: 未知")
-        self.torque_var.set("TORQUE: 未知")
-        self.sequence_var.set("Stage-I 探测: 空闲")
-        self._update_keepalive_label()
         self._update_control_state()
-        self._append_log("event", "串口已断开\n")
+        self._append_log("event", "RS485 Debug disconnected\n")
+
+    def disconnect(self) -> None:
+        """Close both independent interfaces during shutdown or update install."""
+        self._disconnect_can()
+        self._disconnect_debug()
 
     def _reader_loop(self) -> None:
         pending = bytearray()
@@ -1437,11 +1597,11 @@ class EasyMotorApp(tk.Tk):
                 elif kind == "can_error":
                     self._append_log("error", f"USB-CAN error: {payload}\n")
                     if self.connected and self.active_interface == "can":
-                        self.disconnect()
+                        self._disconnect_can()
                 else:
                     self._append_log("error", f"串口错误: {payload}\n")
-                    if self.connected:
-                        self.disconnect()
+                    if self.serial_port is not None:
+                        self._disconnect_debug()
         except queue.Empty:
             pass
         try:
@@ -1879,12 +2039,6 @@ class EasyMotorApp(tk.Tk):
 
     def send_command(self, command: str, quiet: bool = False,
                      strict_quiet: bool = False) -> bool:
-        if self.active_interface == "can":
-            if not quiet:
-                self._append_log(
-                    "error", f"RS485 command '{command}' is unavailable on the CAN demo connection.\n"
-                )
-            return False
         normalized = command.strip().lower()
         diagnostic_command = (
             normalized in {"status", "help", "can status", "can codec"}
@@ -1897,9 +2051,18 @@ class EasyMotorApp(tk.Tk):
                     f"RS485 debug is read-only; command '{command}' was blocked. Use CAN for motor control.\n",
                 )
             return False
-        if not self.connected or self.serial_port is None:
+        if self.serial_port is None:
             if not quiet:
-                messagebox.showwarning("未连接", "请先连接串口。")
+                english = self.language_var.get() == "en"
+                messagebox.showwarning(
+                    "Not connected" if english else "未连接",
+                    (
+                        "Connect the RS485 Debug port first. The CAN motion "
+                        "connection can remain online."
+                        if english
+                        else "请先连接 RS485 调试端口。CAN 运动连接可以保持在线。"
+                    ),
+                )
             return False
         payload = (command.strip() + "\r\n").encode("ascii")
         wait_deadline = time.monotonic() + RS485_TX_WAIT_MAX_MS / 1000.0
@@ -1945,8 +2108,17 @@ class EasyMotorApp(tk.Tk):
 
     def toggle_wave_stream(self) -> None:
         """Start/stop the firmware ADC phase-current waveform stream."""
-        if not self.connected:
-            messagebox.showwarning("未连接", "请先连接串口。")
+        if self.serial_port is None:
+            english = self.language_var.get() == "en"
+            messagebox.showwarning(
+                "Not connected" if english else "未连接",
+                (
+                    "Connect the RS485 Debug port first. The CAN motion "
+                    "connection can remain online."
+                    if english
+                    else "请先连接 RS485 调试端口。CAN 运动连接可以保持在线。"
+                ),
+            )
             return
         if not self.streaming:
             dec = max(1, min(100, self.wave_dec_var.get()))
@@ -3249,7 +3421,7 @@ class EasyMotorApp(tk.Tk):
 
     def _install_downloaded_update(self, path: Path, release: UpdateRelease) -> None:
         language = self.language_var.get()
-        if self.connected or self._motor_activity_active():
+        if self.connected or self.serial_port is not None or self._motor_activity_active():
             messagebox.showwarning(
                 tr(language, "update_install_title"),
                 tr(language, "update_requires_idle"),
@@ -3294,12 +3466,6 @@ class EasyMotorApp(tk.Tk):
             except tk.TclError:
                 pass
             self.can_tool_window = None
-        if self.connected and self.serial_port is not None:
-            try:
-                self.send_command("stop", quiet=True)
-                time.sleep(0.05)
-            except Exception:
-                pass
         self.disconnect()
         self.quit()
         self.destroy()
