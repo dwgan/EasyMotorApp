@@ -1,28 +1,9 @@
-"""EasyMotor demonstration and engineering console.
+"""EasyMotor CAN demonstration and engineering diagnostics application.
 
-Protocol-aligned with the current firmware console (motor_command_console.c):
-
-  UART5: 2.5 Mbit/s, 8N1, RS485 half-duplex (hardware DE on PB3)
-  Commands: start | iq -100..100 | speed -20..20 | keep | stop |
-            status | faultack | help
-
-Telemetry parsed:
-  RT           1 s compact runtime line (pwm/enc/slk/dmiss/out/...)
-  TORQUE_CMD   explicit `status` reply
-  SPEED        explicit `status` reply
-  MOTION       1 s motion snapshot and `status` reply
-  SPEED_TRACE  100 ms trajectory while speed mode is active
-  ENC_ERR      rotor AS5047P health counters
-  EANG_RIPPLE  12 electrical-angle ripple bins printed after `stop`
-  PWM_TEST     boot/verbose PWM bring-up line (freq/ARR/CCR)
-  ENCODER_RT   boot line advertising rotor-frame and FOC rates
-  WAVE_STREAM  binary ADC phase-current frames while "wave on" is active
-  CAN_NODE     RS04 CAN node boot/status lines and debug commands
-
-Successful `keep` is silent on the firmware side; a rejected `keep` is
-visible.  The MCU remains the final authority for current limits, state
-transitions, watchdogs, and faults; this GUI only automates the documented
-bench procedure.
+Motion control uses the validated CAN Type 3/1/4 path. UART5 is an optional,
+read-only engineering channel for status, logs, and waveform samples. The
+firmware remains the authority for limits, watchdogs, state transitions, and
+faults.
 """
 
 from __future__ import annotations
@@ -51,7 +32,7 @@ from easymotor.branding import apply_window_icon, configure_windows_app_id
 from easymotor.core.safety_policy import (
     DEMO_SPEED_PRESETS_RPM,
 )
-from easymotor.features.can_tool import CanToolWindow
+from easymotor.features.can_parameters import CanParameterPanel
 from easymotor.features.demo import DemoView
 from easymotor.features.update_dialog import UpdateDialog
 from easymotor.i18n import (
@@ -105,9 +86,8 @@ messagebox = LocalizedMessageBox(tk_messagebox)
 BAUD_RATE = 2_500_000
 CAN_ENUMERATION_RETRY_MS = 1_000
 CAN_ENUMERATION_GUIDANCE_MS = 10_000
-KEEPALIVE_INTERVAL_MS = 250
+COMMAND_REFRESH_INTERVAL_MS = 250
 START_TIMEOUT_MS = 30_000
-MAX_IQ_LSB = 100
 MAX_SPEED_RPM = 20
 RS485_RX_QUIET_MS = 20
 RS485_TX_WAIT_MAX_MS = 50
@@ -115,14 +95,20 @@ ENCODER_COUNTS_PER_REV = 16_384
 NOMINAL_REDUCTION = 9.0
 STOP_RETRY_INTERVAL_MS = 150
 STOP_MAX_ATTEMPTS = 3
-SEQ_WAIT_RUN_TIMEOUT_MS = 30_000
-SEQ_WAIT_IDLE_TIMEOUT_MS = 6_000
-SEQ_TICK_MS = 100
-EANG_COLLECT_TIMEOUT_S = 5.0
 
 ENGINEER_TEXT_EN = {
     "工程师模式": "Advanced Engineering",
     "返回演示模式": "Back to Demo",
+    "接口状态": "Interface Status",
+    "CAN 运动接口": "CAN Motion Interface",
+    "RS485 Debug 接口": "RS485 Debug Interface",
+    "电机与安全状态": "Motor and Safety Status",
+    "运动只由 CAN Control 发起；RS485 Debug 只读取内部状态和波形。": "Motion is initiated only from CAN Control; RS485 Debug only reads internal status and waveforms.",
+    "USB-CAN 串口": "USB-CAN COM Port",
+    "RS485 Debug 连接": "RS485 Debug Connection",
+    "调试串口": "Debug COM Port",
+    "RS485 Debug 状态": "RS485 Debug Status",
+    "CAN Type 2 反馈": "CAN Type 2 Feedback",
     "串口连接": "RS485 Connection",
     "RS485 调试连接": "RS485 Debug Connection",
     "通信连接": "Communication Connections",
@@ -141,60 +127,14 @@ ENGINEER_TEXT_EN = {
     "断开": "Disconnect",
     "控制状态": "Control Status",
     "查询状态": "Query Status",
-    "帮助": "Help",
+    "RS485 状态": "RS485 Status",
     "波形窗口": "Waveform",
-    "运动与 PWM 遥测": "Motion and PWM Telemetry",
-    "CAN 调试 (RS04 从机 / 1Mbps 经典扩展帧)": "CAN Diagnostics (RS04 node / 1 Mbps extended)",
-    "正常模式": "CAN Normal",
-    "待机": "CAN Standby",
-    "自回环": "Loopback",
-    "编解码自检": "Codec Test",
-    "上报开": "Reports On",
-    "上报关": "Reports Off",
-    "USB-CAN 参数验收": "USB-CAN Parameters",
-    "安全控制": "Protected Controls",
-    "启动与停止": "Start and Stop",
-    "转矩测试": "Torque Test",
-    "速度测试": "Speed Test",
-    "持续运行": "Continuous Run",
-    "Stage-I 验收": "Stage-I Acceptance",
-    "高级诊断": "Advanced Diagnostics",
-    "1. 启动并等待 RUN": "1. Enable and wait for RUN",
-    "Iq (LSB，约10mA/LSB)": "Iq (LSB, approx. 10 mA/LSB)",
-    "正向定时脉冲": "Forward Iq pulse",
-    "反向定时脉冲": "Reverse Iq pulse",
-    "Iq 归零": "Zero Iq",
-    "持续运行自动 Keepalive（250ms）": "Continuous keepalive (250 ms)",
-    "测试时长(ms)": "Duration (ms)",
-    "单次 Keep": "Send Keep",
+    "RS485 Debug 运动与 PWM 遥测": "RS485 Debug Motion and PWM Telemetry",
+    "RS485 Debug 电流波形": "RS485 Debug Current Waveform",
     "停止": "STOP",
-    "速度 (电机轴 rpm)": "Speed (motor-shaft rpm)",
-    "正向低速测试": "Forward timed run",
-    "反向低速测试": "Reverse timed run",
-    "持续正向": "Forward continuous",
-    "持续反向": "Reverse continuous",
-    "速度归零": "Zero speed",
-    "Stage-I 双向探测": "Stage-I bidirectional probe",
-    "中止序列": "Abort sequence",
-    "Stage-I 完整验收": "Stage-I full acceptance",
-    "验收档位 rpm(逗号分隔)": "Acceptance rpm (comma-separated)",
-    "故障确认": "Acknowledge fault",
-    "清空日志": "Clear log",
-    "固定占空比保持(hold)": "Fixed-duty hold",
-    "偏移(‰ 5..150)": "Offset (‰ 5..150)",
     "收发日志": "Communication Log",
     "独立日志窗口": "Open log window",
     "波形流期间日志与波形并行显示；可导出为文本文件。": "Logs remain available during waveform streaming and can be exported.",
-    (
-        "Iq 是转矩命令，不是转速命令。按 10→20→50→100 LSB 逐级测试；"
-        "速度测试从 5 motor rpm 开始。定时脉冲/速度测试与 Stage-I 双向探测会自动每 500ms 发送 keep，"
-        "到点自动 stop；“持续正向/持续反向”会一直运行直到按停止（长稳验收用），"
-        "同样自动 keep；MCU 自身 1000ms 命令看门狗仍独立生效。"
-    ): (
-        "Iq is torque, not speed. Increase it stepwise (10→20→50→100 LSB); start speed tests at "
-        "5 motor rpm. Timed tests and Stage-I sequences refresh keep automatically and stop at the "
-        "deadline. Continuous runs last until STOP. The MCU 1000 ms watchdog remains independent."
-    ),
     "开始波形": "Start waveform",
     "停止波形": "Stop waveform",
     "分频(1..100)": "Decimation (1..100)",
@@ -313,16 +253,6 @@ WAVE_END_SEQ = 0xFFFF
 WAVE_BUFFER_MAX = 1500
 WAVE_GLITCH_LSB = 60
 
-CAN_READY_RE = re.compile(r"CAN_NODE READY")
-CAN_NODE_ID_RE = re.compile(r"CAN_NODE_ID=(\d+)")
-CAN_MASTER_ID_RE = re.compile(r"CAN_MASTER_ID=(\d+)")
-CAN_STATUS_HEAD_RE = re.compile(r"CAN_NODE STATUS")
-CAN_STATUS_ID_RE = re.compile(r"^  (node_id|master_id)=0x(\d+)$")
-CAN_STATUS_FIELD_RE = re.compile(r"^  (\w+)=(\d+)$")
-CAN_CODEC_PASS_RE = re.compile(r"CAN_CODEC PASS")
-CAN_CODEC_FAIL_RE = re.compile(r"CAN_CODEC FAIL")
-
-
 def format_torque_error(error_code: int) -> str:
     """Decode the TORQUE_CMD error bitmask into readable labels."""
     names = [name for bit, name in TORQUE_ERROR_BITS if error_code & bit]
@@ -363,28 +293,12 @@ class EasyMotorApp(tk.Tk):
         self.mci_state: int | None = None
         self.start_waiting = False
         self.start_deadline = 0.0
-        self.nonzero_iq_active = False
+        self.motion_command_active = False
         self.pulse_active = False
         self.continuous_active = False
         self.pulse_deadline = 0.0
         self.stop_pending = False
         self.stop_attempts = 0
-
-        self.sequence_active = False
-        self.sequence_step = 0
-        self.sequence_speed = 5
-        self.sequence_duration_ms = 5000
-        self.sequence_deadline = 0.0
-
-        # Stage-I full acceptance: [+10, -10, +20, -20] rpm, one click.
-        self.acc_active = False
-        self.acc_phase = ""  # start | speed | idle | eang
-        self.acc_index = 0
-        self.acc_schedule: list[tuple[int, int]] = []  # (rpm, duration_ms)
-        self.acc_data: list[dict[str, object]] = []
-        self.acc_deadline = 0.0
-        self.acc_eang_deadline = 0.0
-        self.acc_started_mono = 0.0
 
         self.eangle_pending = False
         self.eangle_bins: list[tuple[int, ...]] = []
@@ -397,21 +311,14 @@ class EasyMotorApp(tk.Tk):
         self.connection_var = localized_var(tr(DEFAULT_LANGUAGE, "not_connected"))
         self.debug_connection_var = localized_var(tr(DEFAULT_LANGUAGE, "not_connected"))
         self.engineer_can_status_var = localized_var(tr(DEFAULT_LANGUAGE, "connect_first"))
+        self.can_feedback_var = localized_var("CAN Type 2 反馈：尚未收到")
         self.engineer_can_speed_var = tk.IntVar(value=DEMO_SPEED_PRESETS_RPM[0])
         self.engineer_can_continuous_var = tk.BooleanVar(value=False)
         self.state_var = localized_var("MCI: 未知")
+        self.rs485_state_var = localized_var("RS485 MCI：尚未读取")
         self.torque_var = localized_var("TORQUE: 未知")
-        self.sequence_var = localized_var("Stage-I 探测: 空闲")
-        self.iq_var = tk.IntVar(value=5)
-        self.speed_var = tk.IntVar(value=5)
-        self.pulse_duration_var = tk.IntVar(value=5000)
-        self.hold_offset_var = tk.IntVar(value=10)
-        self.acc_speeds_var = tk.StringVar(value="10,20")
-        self.auto_keep_var = tk.BooleanVar(value=False)
-        self.keep_status_var = localized_var("Keepalive: 关闭")
-        self.keep_sent_count = 0
-        self.keep_busy_retry_count = 0
-        self.keep_forced_count = 0
+        self.command_refresh_var = localized_var("CAN command refresh: idle")
+        self.command_refresh_count = 0
         self.freq_var = localized_var("PWM/FOC: 未知")
         self._freq_pwm_hz: int | None = None
         self._freq_foc_hz: int | None = None
@@ -454,21 +361,8 @@ class EasyMotorApp(tk.Tk):
         self.wave_toggle_button: ttk.Button | None = None
         self.log_popup: tk.Toplevel | None = None
         self.log_popup_text: tk.Text | None = None
-        self._log_entries: list[tuple[str, str, str]] = []
-        self.can_ready = False
-        self.can_node_id: int | None = None
-        self.can_master_id: int | None = None
-        self.can_normal = False
-        self.can_rx_frames = 0
-        self.can_tx_requests = 0
-        self.can_tx_fail = 0
-        self.can_tx_err = 0
-        self.can_rx_err = 0
-        self.can_bus_off = 0
-        self.can_accepted = 0
-        self.can_active_report = False
-        self.can_status_var = localized_var("CAN: 未初始化")
-        self.can_tool_window: CanToolWindow | None = None
+        self._log_entries: list[tuple[str, str, str, str]] = []
+        self._active_log_channel = "app"
         self.update_dialog: UpdateDialog | None = None
         self.demo_service = DemoService()
         self.app_mode = "demo"
@@ -476,7 +370,7 @@ class EasyMotorApp(tk.Tk):
         self._build_ui()
         self.refresh_ports()
         self.after(20, self._process_rx_queue)
-        self.after(KEEPALIVE_INTERVAL_MS, self._keepalive_tick)
+        self.after(COMMAND_REFRESH_INTERVAL_MS, self._can_command_refresh_tick)
         self.after(50, self._wave_redraw)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -529,86 +423,131 @@ class EasyMotorApp(tk.Tk):
             engineer_header, text="返回演示模式", command=self.show_demo_mode
         ).pack(side=tk.RIGHT)
 
-        connection = ttk.LabelFrame(outer, text="通信连接", padding=10)
-        connection.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(connection, text="CAN 运动连接").grid(row=0, column=0, padx=(0, 6))
-        self.advanced_can_port_combo = ttk.Combobox(
-            connection, textvariable=self.port_var, width=18, state="readonly"
-        )
-        self.advanced_can_port_combo.grid(row=0, column=1, padx=(0, 6))
-        self.advanced_can_refresh_button = ttk.Button(
-            connection, text="刷新", command=self.refresh_ports
-        )
-        self.advanced_can_refresh_button.grid(row=0, column=2, padx=(0, 12))
-        self.advanced_can_connect_button = ttk.Button(
-            connection, text="连接", command=self.toggle_connection
-        )
-        self.advanced_can_connect_button.grid(row=0, column=3)
-        ttk.Label(connection, textvariable=self.connection_var).grid(
-            row=0, column=4, columnspan=2, padx=(12, 0), sticky="w"
-        )
-        ttk.Label(connection, text="RS485 调试端口").grid(
-            row=1, column=0, padx=(0, 6), pady=(6, 0)
-        )
-        self.port_combo = ttk.Combobox(
-            connection, textvariable=self.debug_port_var, width=18, state="readonly"
-        )
-        self.port_combo.grid(row=1, column=1, padx=(0, 6), pady=(6, 0))
-        ttk.Button(connection, text="刷新", command=self.refresh_ports).grid(
-            row=1, column=2, padx=(0, 12), pady=(6, 0)
-        )
-        ttk.Label(connection, text=f"{BAUD_RATE:,} baud / 8N1 / RS485").grid(
-            row=1, column=3, padx=(0, 12), pady=(6, 0)
-        )
-        self.connect_button = ttk.Button(
-            connection, text="连接", command=self.toggle_debug_connection
-        )
-        self.connect_button.grid(row=1, column=4, pady=(6, 0))
-        ttk.Label(connection, textvariable=self.debug_connection_var).grid(
-            row=1, column=5, padx=(12, 0), pady=(6, 0)
-        )
-        connection.columnconfigure(6, weight=1)
-
         self.engineer_notebook = ttk.Notebook(outer)
         self.engineer_notebook.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        self.engineer_control_tab = ttk.Frame(self.engineer_notebook)
-        self.engineer_monitor_tab = ttk.Frame(self.engineer_notebook)
+        self.engineer_overview_tab = ttk.Frame(self.engineer_notebook)
         self.engineer_can_tab = ttk.Frame(self.engineer_notebook)
+        self.engineer_rs485_tab = ttk.Frame(self.engineer_notebook)
         self.engineer_log_tab = ttk.Frame(self.engineer_notebook)
         self._engineer_tab_titles = (
-            (self.engineer_monitor_tab, "状态与遥测", "Monitor"),
-            (self.engineer_can_tab, "CAN 调试", "CAN"),
+            (self.engineer_overview_tab, "总览", "Overview"),
+            (self.engineer_can_tab, "CAN 控制", "CAN Control"),
+            (self.engineer_rs485_tab, "RS485 调试", "RS485 Debug"),
             (self.engineer_log_tab, "收发日志", "Logs"),
         )
         for tab, chinese, _english in self._engineer_tab_titles:
             self.engineer_notebook.add(tab, text=chinese)
 
-        state_frame = ttk.LabelFrame(
-            self.engineer_monitor_tab, text="控制状态", padding=10
+        overview_interfaces = ttk.LabelFrame(
+            self.engineer_overview_tab, text="接口状态", padding=12
         )
-        state_frame.pack(fill=tk.X, padx=8, pady=8)
+        overview_interfaces.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Label(overview_interfaces, text="CAN 运动接口").grid(
+            row=0, column=0, padx=(0, 18), sticky="w"
+        )
+        ttk.Label(overview_interfaces, textvariable=self.connection_var).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Label(overview_interfaces, text="RS485 Debug 接口").grid(
+            row=1, column=0, padx=(0, 18), pady=(8, 0), sticky="w"
+        )
+        ttk.Label(overview_interfaces, textvariable=self.debug_connection_var).grid(
+            row=1, column=1, pady=(8, 0), sticky="w"
+        )
+        overview_interfaces.columnconfigure(2, weight=1)
+
+        overview_motor = ttk.LabelFrame(
+            self.engineer_overview_tab, text="电机与安全状态", padding=12
+        )
+        overview_motor.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Label(
-            state_frame, textvariable=self.state_var, font=("Microsoft YaHei UI", 12)
+            overview_motor,
+            textvariable=self.engineer_can_status_var,
+            font=("Microsoft YaHei UI", 12),
+        ).pack(anchor="w")
+        ttk.Label(overview_motor, textvariable=self.can_feedback_var).pack(
+            anchor="w", pady=(8, 0)
+        )
+        ttk.Label(
+            overview_motor,
+            text="运动只由 CAN Control 发起；RS485 Debug 只读取内部状态和波形。",
+            foreground=WARNING_TEXT,
+        ).pack(anchor="w", pady=(10, 0))
+
+        can_connection = ttk.LabelFrame(
+            self.engineer_can_tab, text="CAN 运动连接", padding=10
+        )
+        can_connection.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Label(can_connection, text="USB-CAN 串口").grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        self.advanced_can_port_combo = ttk.Combobox(
+            can_connection, textvariable=self.port_var, width=18, state="readonly"
+        )
+        self.advanced_can_port_combo.grid(row=0, column=1, padx=(0, 6))
+        self.advanced_can_refresh_button = ttk.Button(
+            can_connection, text="刷新", command=self.refresh_ports
+        )
+        self.advanced_can_refresh_button.grid(row=0, column=2, padx=(0, 12))
+        self.advanced_can_connect_button = ttk.Button(
+            can_connection, text="连接", command=self.toggle_connection
+        )
+        self.advanced_can_connect_button.grid(row=0, column=3)
+        ttk.Label(can_connection, textvariable=self.connection_var).grid(
+            row=0, column=4, padx=(12, 0), sticky="w"
+        )
+        can_connection.columnconfigure(5, weight=1)
+
+        debug_connection = ttk.LabelFrame(
+            self.engineer_rs485_tab, text="RS485 Debug 连接", padding=10
+        )
+        debug_connection.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Label(debug_connection, text="调试串口").grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        self.port_combo = ttk.Combobox(
+            debug_connection,
+            textvariable=self.debug_port_var,
+            width=18,
+            state="readonly",
+        )
+        self.port_combo.grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(debug_connection, text="刷新", command=self.refresh_ports).grid(
+            row=0, column=2, padx=(0, 12)
+        )
+        ttk.Label(debug_connection, text=f"{BAUD_RATE:,} baud / 8N1 / RS485").grid(
+            row=0, column=3, padx=(0, 12)
+        )
+        self.connect_button = ttk.Button(
+            debug_connection, text="连接", command=self.toggle_debug_connection
+        )
+        self.connect_button.grid(row=0, column=4)
+        ttk.Label(debug_connection, textvariable=self.debug_connection_var).grid(
+            row=0, column=5, padx=(12, 0), sticky="w"
+        )
+        debug_connection.columnconfigure(6, weight=1)
+
+        state_frame = ttk.LabelFrame(
+            self.engineer_rs485_tab,
+            text="RS485 Debug 状态",
+            padding=10,
+        )
+        state_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Label(
+            state_frame,
+            textvariable=self.rs485_state_var,
+            font=("Microsoft YaHei UI", 12),
         ).grid(row=0, column=0, sticky="w")
-        ttk.Label(state_frame, textvariable=self.keep_status_var).grid(
+        ttk.Label(state_frame, textvariable=self.torque_var).grid(
             row=0, column=1, padx=(24, 0), sticky="w"
         )
-        ttk.Label(state_frame, textvariable=self.sequence_var).grid(
-            row=0, column=2, padx=(24, 0), sticky="w"
-        )
         ttk.Button(
-            state_frame, text="查询状态", command=lambda: self.send_command("status")
+            state_frame, text="RS485 状态", command=lambda: self.send_command("status")
         ).grid(row=1, column=0, padx=(0, 4), pady=(6, 0), sticky="w")
-        ttk.Button(
-            state_frame, text="帮助", command=lambda: self.send_command("help")
-        ).grid(row=1, column=1, padx=4, pady=(6, 0), sticky="w")
-        ttk.Label(state_frame, textvariable=self.torque_var).grid(
-            row=1, column=2, padx=(24, 0), pady=(6, 0), sticky="w"
-        )
         state_frame.columnconfigure(3, weight=1)
 
         motion_frame = ttk.LabelFrame(
-            self.engineer_monitor_tab, text="运动与 PWM 遥测", padding=10
+            self.engineer_rs485_tab, text="RS485 Debug 运动与 PWM 遥测", padding=10
         )
         motion_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Label(motion_frame, textvariable=self.motion_var).grid(
@@ -635,7 +574,7 @@ class EasyMotorApp(tk.Tk):
         motion_frame.columnconfigure(0, weight=1)
 
         waveform_frame = ttk.LabelFrame(
-            self.engineer_monitor_tab, text="波形窗口", padding=10
+            self.engineer_rs485_tab, text="RS485 Debug 电流波形", padding=10
         )
         waveform_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Button(
@@ -655,7 +594,7 @@ class EasyMotorApp(tk.Tk):
         )
         can_motion.pack(fill=tk.X, padx=8, pady=8)
         ttk.Label(can_motion, textvariable=self.engineer_can_status_var).grid(
-            row=0, column=0, columnspan=8, sticky="w", pady=(0, 8)
+            row=0, column=0, columnspan=7, sticky="w", pady=(0, 8)
         )
         ttk.Label(can_motion, text="速度档位").grid(
             row=1, column=0, padx=(0, 6), sticky="w"
@@ -682,10 +621,6 @@ class EasyMotorApp(tk.Tk):
             can_motion, text="反转", command=lambda: self._start_engineer_can_run(-1)
         )
         self.engineer_can_reverse_button.grid(row=1, column=6, padx=4)
-        self.engineer_can_wave_button = ttk.Button(
-            can_motion, text="打开波形窗口", command=self.open_wave_popup
-        )
-        self.engineer_can_wave_button.grid(row=1, column=7, padx=(18, 0))
         self.engineer_can_continuous_check = ttk.Checkbutton(
             can_motion,
             text="一直转（直到停止）",
@@ -698,233 +633,32 @@ class EasyMotorApp(tk.Tk):
             can_motion,
             text="未勾选时单次运行 5 秒；控制仍受 CAN 看门狗和固件安全门限保护。",
             foreground=WARNING_TEXT,
-        ).grid(row=2, column=4, columnspan=4, sticky="w", padx=(18, 0), pady=(8, 0))
-        can_motion.columnconfigure(8, weight=1)
+        ).grid(row=2, column=4, columnspan=3, sticky="w", padx=(18, 0), pady=(8, 0))
+        can_motion.columnconfigure(7, weight=1)
 
-        can_frame = ttk.LabelFrame(
-            self.engineer_can_tab,
-            text="CAN 调试 (RS04 从机 / 1Mbps 经典扩展帧)",
-            padding=10,
+        can_feedback = ttk.LabelFrame(
+            self.engineer_can_tab, text="CAN Type 2 反馈", padding=10
         )
-        can_frame.pack(fill=tk.X, padx=8, pady=8)
-        can_tools = ttk.Frame(can_frame)
-        can_tools.pack(fill=tk.X)
-        ttk.Button(
-            can_tools, text="查询状态",
-            command=lambda: self.send_command("can status"),
-        ).grid(row=0, column=0, padx=(0, 4))
-        ttk.Button(
-            can_tools, text="编解码自检",
-            command=lambda: self.send_command("can codec"),
-        ).grid(row=0, column=1, padx=4)
-        ttk.Button(
-            can_tools, text="USB-CAN 参数验收",
-            command=self.open_can_tool_window,
-        ).grid(row=0, column=2, padx=(12, 4))
-        can_tools.columnconfigure(3, weight=1)
-        ttk.Label(can_frame, textvariable=self.can_status_var).pack(
-            fill=tk.X, pady=(6, 0)
+        can_feedback.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Label(can_feedback, textvariable=self.can_feedback_var).pack(anchor="w")
+        ttk.Label(can_feedback, textvariable=self.command_refresh_var).pack(
+            anchor="w", pady=(6, 0)
         )
 
-        controls = ttk.Frame(self.engineer_control_tab, padding=8)
-        controls.pack(fill=tk.BOTH, expand=True)
-
-        lifecycle = ttk.LabelFrame(controls, text="启动与停止", padding=8)
-        lifecycle.pack(fill=tk.X)
-        self.start_button = ttk.Button(
-            lifecycle, text="1. 启动并等待 RUN", command=self.start_motor
+        parameter_frame = ttk.LabelFrame(
+            self.engineer_can_tab, text="CAN 参数", padding=10
         )
-        self.start_button.grid(row=0, column=0, padx=4, sticky="ew")
-        ttk.Button(
-            lifecycle, text="停止", command=self.stop_motor, style="Stop.TButton"
-        ).grid(row=0, column=1, padx=4, sticky="ew")
-        ttk.Label(lifecycle, text="测试时长(ms)").grid(
-            row=0, column=2, padx=(20, 4)
+        parameter_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self.can_parameter_panel = CanParameterPanel(
+            parameter_frame,
+            language_var=self.language_var,
+            send_frame=self._send_parameter_frame,
+            connected_getter=self._parameter_connection_ready,
+            idle_getter=self._parameter_operation_idle,
+            log_callback=lambda level, text: self._append_log(level, text, "can"),
+            state_callback=self._update_control_state,
         )
-        self.pulse_spin = ttk.Spinbox(
-            lifecycle,
-            from_=500,
-            to=5000,
-            increment=500,
-            textvariable=self.pulse_duration_var,
-            width=7,
-            justify="center",
-        )
-        self.pulse_spin.grid(row=0, column=3, padx=4)
-        ttk.Button(
-            lifecycle, text="单次 Keep", command=lambda: self.send_command("keep")
-        ).grid(row=0, column=4, padx=4)
-        ttk.Button(
-            lifecycle,
-            text="故障确认",
-            command=lambda: self.send_command("faultack"),
-        ).grid(row=0, column=5, padx=4)
-        lifecycle.columnconfigure(0, weight=1)
-        lifecycle.columnconfigure(1, weight=1)
-
-        test_row = ttk.Frame(controls)
-        test_row.pack(fill=tk.X, pady=(8, 0))
-        torque = ttk.LabelFrame(test_row, text="转矩测试", padding=8)
-        speed = ttk.LabelFrame(test_row, text="速度测试", padding=8)
-        torque.grid(row=0, column=0, padx=(0, 4), sticky="nsew")
-        speed.grid(row=0, column=1, padx=(4, 0), sticky="nsew")
-        test_row.columnconfigure(0, weight=1)
-        test_row.columnconfigure(1, weight=1)
-
-        ttk.Label(torque, text="Iq (LSB，约10mA/LSB)").grid(
-            row=0, column=0, padx=(0, 4), sticky="e"
-        )
-        self.iq_spin = ttk.Spinbox(
-            torque,
-            from_=1,
-            to=MAX_IQ_LSB,
-            textvariable=self.iq_var,
-            width=6,
-            justify="center",
-        )
-        self.iq_spin.grid(row=0, column=1, padx=4, sticky="w")
-        self.positive_button = ttk.Button(
-            torque, text="正向定时脉冲", command=lambda: self.start_timed_pulse(+1)
-        )
-        self.positive_button.grid(row=1, column=0, padx=4, pady=(8, 0), sticky="ew")
-        self.negative_button = ttk.Button(
-            torque, text="反向定时脉冲", command=lambda: self.start_timed_pulse(-1)
-        )
-        self.negative_button.grid(row=1, column=1, padx=4, pady=(8, 0), sticky="ew")
-        ttk.Button(
-            torque, text="Iq 归零", command=lambda: self.send_iq(0)
-        ).grid(row=1, column=2, padx=4, pady=(8, 0), sticky="ew")
-        for column in range(3):
-            torque.columnconfigure(column, weight=1)
-
-        ttk.Label(speed, text="速度 (电机轴 rpm)").grid(
-            row=0, column=0, padx=(0, 4), sticky="e"
-        )
-        self.speed_spin = ttk.Spinbox(
-            speed,
-            from_=1,
-            to=MAX_SPEED_RPM,
-            textvariable=self.speed_var,
-            width=6,
-            justify="center",
-        )
-        self.speed_spin.grid(row=0, column=1, padx=4, sticky="w")
-        self.speed_positive_button = ttk.Button(
-            speed,
-            text="正向低速测试",
-            command=lambda: self.start_timed_speed(+1),
-        )
-        self.speed_positive_button.grid(
-            row=1, column=0, padx=4, pady=(8, 0), sticky="ew"
-        )
-        self.speed_negative_button = ttk.Button(
-            speed,
-            text="反向低速测试",
-            command=lambda: self.start_timed_speed(-1),
-        )
-        self.speed_negative_button.grid(
-            row=1, column=1, padx=4, pady=(8, 0), sticky="ew"
-        )
-        ttk.Button(
-            speed, text="速度归零", command=lambda: self.send_speed(0)
-        ).grid(row=1, column=2, padx=4, pady=(8, 0), sticky="ew")
-        for column in range(3):
-            speed.columnconfigure(column, weight=1)
-
-        continuous = ttk.LabelFrame(controls, text="持续运行", padding=8)
-        continuous.pack(fill=tk.X, pady=(8, 0))
-        self.keep_check = ttk.Checkbutton(
-            continuous,
-            text="持续运行自动 Keepalive（250ms）",
-            variable=self.auto_keep_var,
-            command=self._update_keepalive_label,
-        )
-        self.keep_check.grid(row=0, column=0, padx=4, sticky="w")
-        ttk.Button(
-            continuous,
-            text="持续正向",
-            command=lambda: self.start_continuous_speed(+1),
-        ).grid(row=0, column=1, padx=4, sticky="ew")
-        ttk.Button(
-            continuous,
-            text="持续反向",
-            command=lambda: self.start_continuous_speed(-1),
-        ).grid(row=0, column=2, padx=4, sticky="ew")
-        continuous.columnconfigure(0, weight=1)
-        continuous.columnconfigure(1, weight=1)
-        continuous.columnconfigure(2, weight=1)
-
-        lower_row = ttk.Frame(controls)
-        lower_row.pack(fill=tk.X, pady=(8, 0))
-        acceptance = ttk.LabelFrame(lower_row, text="Stage-I 验收", padding=8)
-        diagnostics = ttk.LabelFrame(lower_row, text="高级诊断", padding=8)
-        acceptance.grid(row=0, column=0, padx=(0, 4), sticky="nsew")
-        diagnostics.grid(row=0, column=1, padx=(4, 0), sticky="nsew")
-        lower_row.columnconfigure(0, weight=3)
-        lower_row.columnconfigure(1, weight=2)
-
-        ttk.Button(
-            acceptance,
-            text="Stage-I 双向探测",
-            command=self.run_stage_i_probe,
-        ).grid(row=0, column=0, padx=4, sticky="ew")
-        ttk.Button(
-            acceptance, text="Stage-I 完整验收", command=self.run_stage_i_acceptance
-        ).grid(row=0, column=1, padx=4, sticky="ew")
-        ttk.Button(
-            acceptance, text="中止序列", command=self.abort_sequence
-        ).grid(row=0, column=2, padx=4, sticky="ew")
-        ttk.Label(acceptance, text="验收档位 rpm(逗号分隔)").grid(
-            row=1, column=0, padx=4, pady=(8, 0), sticky="e"
-        )
-        self.acc_speeds_entry = ttk.Entry(
-            acceptance, textvariable=self.acc_speeds_var, width=14
-        )
-        self.acc_speeds_entry.grid(
-            row=1, column=1, columnspan=2, padx=4, pady=(8, 0), sticky="ew"
-        )
-        for column in range(3):
-            acceptance.columnconfigure(column, weight=1)
-
-        ttk.Label(diagnostics, text="偏移(‰ 5..150)").grid(
-            row=0, column=0, padx=(0, 4), sticky="e"
-        )
-        self.hold_offset_spin = ttk.Spinbox(
-            diagnostics,
-            from_=5,
-            to=150,
-            textvariable=self.hold_offset_var,
-            width=6,
-            justify="center",
-        )
-        self.hold_offset_spin.grid(row=0, column=1, padx=4, sticky="w")
-        ttk.Button(
-            diagnostics, text="固定占空比保持(hold)", command=self.start_scope_hold
-        ).grid(row=1, column=0, columnspan=2, padx=4, pady=(8, 0), sticky="ew")
-        ttk.Button(
-            diagnostics, text="波形窗口", command=self.open_wave_popup
-        ).grid(row=2, column=0, padx=4, pady=(8, 0), sticky="ew")
-        ttk.Button(diagnostics, text="清空日志", command=self.clear_log).grid(
-            row=2, column=1, padx=4, pady=(8, 0), sticky="ew"
-        )
-        diagnostics.columnconfigure(0, weight=1)
-        diagnostics.columnconfigure(1, weight=1)
-
-        note = (
-            "Iq 是转矩命令，不是转速命令。按 10→20→50→100 LSB 逐级测试；"
-            "速度测试从 5 motor rpm 开始。定时脉冲/速度测试与 Stage-I 双向探测会自动每 500ms 发送 keep，"
-            "到点自动 stop；“持续正向/持续反向”会一直运行直到按停止（长稳验收用），"
-            "同样自动 keep；MCU 自身 1000ms 命令看门狗仍独立生效。"
-        )
-        ttk.Label(
-            controls,
-            text=note,
-            foreground=WARNING_TEXT,
-            wraplength=1020,
-            justify=tk.LEFT,
-        ).pack(
-            fill=tk.X, pady=(8, 0)
-        )
+        self.can_parameter_panel.pack(fill=tk.X)
 
         log_frame = ttk.LabelFrame(
             self.engineer_log_tab, text="收发日志", padding=6
@@ -939,30 +673,48 @@ class EasyMotorApp(tk.Tk):
             log_tools, text="波形流期间日志与波形并行显示；可导出为文本文件。"
         ).grid(row=0, column=1, sticky="w")
         log_tools.columnconfigure(2, weight=1)
-        self.log = tk.Text(
-            log_frame,
-            wrap=tk.NONE,
-            state=tk.DISABLED,
-            font=("Consolas", 10),
-            background=LOG_BACKGROUND,
-            foreground=LOG_FOREGROUND,
-            insertbackground=LOG_FOREGROUND,
+        self.log_notebook = ttk.Notebook(log_frame)
+        self.log_notebook.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        self.log_widgets: dict[str, tk.Text] = {}
+        self._log_tab_titles = (
+            ("all", "全部", "All"),
+            ("can", "CAN", "CAN"),
+            ("rs485", "RS485 Debug", "RS485 Debug"),
+            ("app", "应用", "Application"),
         )
-        y_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log.yview)
-        x_scroll = ttk.Scrollbar(
-            log_frame, orient=tk.HORIZONTAL, command=self.log.xview
-        )
-        self.log.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-        self.log.grid(row=1, column=0, sticky="nsew")
-        y_scroll.grid(row=1, column=1, sticky="ns")
-        x_scroll.grid(row=2, column=0, sticky="ew")
+        self._log_tabs: dict[str, ttk.Frame] = {}
+        for channel, chinese, _english in self._log_tab_titles:
+            tab = ttk.Frame(self.log_notebook)
+            text = tk.Text(
+                tab,
+                wrap=tk.NONE,
+                state=tk.DISABLED,
+                font=("Consolas", 10),
+                background=LOG_BACKGROUND,
+                foreground=LOG_FOREGROUND,
+                insertbackground=LOG_FOREGROUND,
+            )
+            y_scroll = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=text.yview)
+            x_scroll = ttk.Scrollbar(tab, orient=tk.HORIZONTAL, command=text.xview)
+            text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+            text.grid(row=0, column=0, sticky="nsew")
+            y_scroll.grid(row=0, column=1, sticky="ns")
+            x_scroll.grid(row=1, column=0, sticky="ew")
+            tab.rowconfigure(0, weight=1)
+            tab.columnconfigure(0, weight=1)
+            for tag, color in (
+                ("tx", LOG_TX),
+                ("rx", LOG_FOREGROUND),
+                ("error", LOG_ERROR),
+                ("event", LOG_EVENT),
+            ):
+                text.tag_configure(tag, foreground=color)
+            self.log_notebook.add(tab, text=chinese)
+            self._log_tabs[channel] = tab
+            self.log_widgets[channel] = text
+        self.log = self.log_widgets["all"]
         log_frame.rowconfigure(1, weight=1)
         log_frame.columnconfigure(0, weight=1)
-
-        self.log.tag_configure("tx", foreground=LOG_TX)
-        self.log.tag_configure("rx", foreground=LOG_FOREGROUND)
-        self.log.tag_configure("error", foreground=LOG_ERROR)
-        self.log.tag_configure("event", foreground=LOG_EVENT)
         self._translate_engineer_widgets()
         self._update_control_state()
 
@@ -974,6 +726,12 @@ class EasyMotorApp(tk.Tk):
             for tab, chinese, translated in self._engineer_tab_titles:
                 self.engineer_notebook.tab(
                     tab, text=translated if english else chinese
+                )
+        if hasattr(self, "_log_tab_titles"):
+            english = self.language_var.get() == "en"
+            for channel, chinese, translated in self._log_tab_titles:
+                self.log_notebook.tab(
+                    self._log_tabs[channel], text=translated if english else chinese
                 )
         self.connect_button.configure(
             text=tr(
@@ -1040,7 +798,7 @@ class EasyMotorApp(tk.Tk):
         self.demo_view.pack_forget()
         self.engineer_view.pack(fill=tk.BOTH, expand=True)
         self.app_mode = "engineer"
-        self.engineer_notebook.select(self.engineer_monitor_tab)
+        self.engineer_notebook.select(self.engineer_overview_tab)
         self.geometry("1120x760")
         self.minsize(920, 650)
 
@@ -1049,10 +807,8 @@ class EasyMotorApp(tk.Tk):
             self.start_waiting
             or self.pulse_active
             or self.continuous_active
-            or self.nonzero_iq_active
+            or self.motion_command_active
             or self.stop_pending
-            or self.sequence_active
-            or self.acc_active
             or self.mci_state == 6
             or self.demo_service.phase != DemoPhase.IDLE
         )
@@ -1062,9 +818,8 @@ class EasyMotorApp(tk.Tk):
             self.start_waiting
             or self.pulse_active
             or self.continuous_active
-            or self.sequence_active
-            or self.acc_active
             or self.stop_pending
+            or self.can_parameter_panel.busy
         )
         try:
             action = self.demo_service.request_run(
@@ -1147,7 +902,7 @@ class EasyMotorApp(tk.Tk):
             text = tr(language, "reading")
         else:
             text = tr(language, "unavailable")
-        activity = self._motor_activity_active()
+        activity = self._motor_activity_active() or self.can_parameter_panel.busy
         run_enabled = bool(
             self.connected
             and self.mci_state in (0, 6)
@@ -1183,6 +938,8 @@ class EasyMotorApp(tk.Tk):
             self.engineer_can_continuous_check.configure(state=run_state)
             for button in self.engineer_can_speed_buttons:
                 button.configure(state=run_state)
+        if hasattr(self, "can_parameter_panel"):
+            self.can_parameter_panel.refresh_state()
 
     def on_language_changed(self) -> None:
         self.title(window_title(tr(self.language_var.get(), "app_title")))
@@ -1221,12 +978,7 @@ class EasyMotorApp(tk.Tk):
                     self.log_popup.title(self._ui("收发日志 (独立显示)"))
             except tk.TclError:
                 pass
-        if self.can_tool_window is not None:
-            try:
-                if self.can_tool_window.winfo_exists():
-                    self.can_tool_window.refresh_language()
-            except tk.TclError:
-                pass
+        self.can_parameter_panel.refresh_language()
         if self.update_dialog is not None:
             try:
                 if self.update_dialog.winfo_exists():
@@ -1317,9 +1069,7 @@ class EasyMotorApp(tk.Tk):
             return
 
         self.serial_port = connection
-        self.keep_sent_count = 0
-        self.keep_busy_retry_count = 0
-        self.keep_forced_count = 0
+        self.rs485_state_var.set("RS485 MCI：等待状态")
         self._freq_pwm_hz = None
         self._freq_foc_hz = None
         self._freq_enc_rt_hz = None
@@ -1352,6 +1102,7 @@ class EasyMotorApp(tk.Tk):
         self.mci_state = None
         self.can_uid = None
         self.can_last_feedback_time = 0.0
+        self.can_feedback_var.set("CAN Type 2 反馈：等待设备枚举")
         self.can_command_rpm = 0
         self.can_enumeration_started = time.monotonic()
         self.can_enumeration_generation += 1
@@ -1404,6 +1155,8 @@ class EasyMotorApp(tk.Tk):
 
     def _disconnect_can(self) -> None:
         activity_before_disconnect = self._motor_activity_active()
+        if hasattr(self, "can_parameter_panel"):
+            self.can_parameter_panel.on_disconnect()
         self.demo_service.cancel()
         self.demo_view.reset_continuous()
         can_transport = self.can_transport
@@ -1421,11 +1174,10 @@ class EasyMotorApp(tk.Tk):
         self.can_enumeration_guidance_shown = False
         self.active_interface = None
         self.start_waiting = False
-        self.nonzero_iq_active = False
+        self.motion_command_active = False
         self.pulse_active = False
         self.continuous_active = False
         self.stop_pending = False
-        self.sequence_active = False
         self._rt_health_fragment = ""
         self._enc_health_fragment = ""
         self._freq_pwm_hz = None
@@ -1434,26 +1186,12 @@ class EasyMotorApp(tk.Tk):
         self._rt_last_t_ms = None
         self._rt_last_adc = None
         self.freq_var.set("PWM/FOC: 未知")
-        self.can_ready = False
-        self.can_node_id = None
-        self.can_master_id = None
-        self.can_normal = False
-        self.can_rx_frames = 0
-        self.can_tx_requests = 0
-        self.can_tx_fail = 0
-        self.can_tx_err = 0
-        self.can_rx_err = 0
-        self.can_bus_off = 0
-        self.can_accepted = 0
-        self.can_active_report = False
-        self.can_status_var.set("CAN: 未初始化")
-        self.auto_keep_var.set(False)
         self.connection_var.set(tr(self.language_var.get(), "not_connected"))
         self.mci_state = None
         self.state_var.set("MCI: 未知")
-        self.torque_var.set("TORQUE: 未知")
-        self.sequence_var.set("Stage-I 探测: 空闲")
-        self._update_keepalive_label()
+        self.can_feedback_var.set("CAN Type 2 反馈：尚未收到")
+        self.command_refresh_count = 0
+        self.command_refresh_var.set("CAN command refresh: idle")
         self._update_control_state()
         self._append_log("event", "CAN motion connection disconnected\n")
 
@@ -1484,6 +1222,8 @@ class EasyMotorApp(tk.Tk):
             buf.clear()
         self._wave_stats_entries.clear()
         self.wave_status_var.set("波形: 停止")
+        self.rs485_state_var.set("RS485 MCI：调试端口未连接")
+        self.torque_var.set("TORQUE: 未知")
         self.debug_connection_var.set(tr(self.language_var.get(), "not_connected"))
         self.connect_button.configure(text=tr(self.language_var.get(), "connect"))
         self._update_control_state()
@@ -1581,25 +1321,28 @@ class EasyMotorApp(tk.Tk):
                 kind, payload = self.rx_queue.get_nowait()
                 if kind == "line":
                     line = str(payload)
-                    self._append_log("rx", f"RX  {line}\n")
+                    self._append_log("rx", f"RX  {line}\n", "rs485")
                     try:
+                        self._active_log_channel = "rs485"
                         self._parse_status_line(line)
                     except Exception as exc:  # Keep the UI alive on parse bugs.
-                        self._append_log("error", f"解析异常: {exc!r}\n")
+                        self._append_log("error", f"解析异常: {exc!r}\n", "rs485")
+                    finally:
+                        self._active_log_channel = "app"
                 elif kind == "wave":
                     self._on_wave_frame(payload)
                 elif kind == "wave_stats":
                     self._on_wave_stats_frame(payload)
                 elif kind == "can_tx":
-                    self._append_log("tx", f"CAN TX {format_frame(payload)}\n")
+                    self._append_log("tx", f"CAN TX {format_frame(payload)}\n", "can")
                 elif kind == "can_frame":
                     self._handle_can_frame(payload)
                 elif kind == "can_error":
-                    self._append_log("error", f"USB-CAN error: {payload}\n")
+                    self._append_log("error", f"USB-CAN error: {payload}\n", "can")
                     if self.connected and self.active_interface == "can":
                         self._disconnect_can()
                 else:
-                    self._append_log("error", f"串口错误: {payload}\n")
+                    self._append_log("error", f"串口错误: {payload}\n", "rs485")
                     if self.serial_port is not None:
                         self._disconnect_debug()
         except queue.Empty:
@@ -1607,25 +1350,29 @@ class EasyMotorApp(tk.Tk):
         try:
             self._poll_start_sequence()
         except Exception as exc:  # Keep the keepalive/sequence loop alive.
-            self._append_log("error", f"轮询异常: {exc!r}\n")
+            self._append_log("error", f"轮询异常: {exc!r}\n", "app")
         self.after(20, self._process_rx_queue)
 
     def _handle_can_frame(self, frame: CanFrame) -> None:
+        if self.can_parameter_panel.handle_frame(frame):
+            self._append_log("rx", f"CAN RX {format_frame(frame)}\n", "can")
+            self.can_parameter_panel.refresh_state()
+            return
         device = parse_device_id_response(frame)
         if device is not None:
-            self._append_log("rx", f"CAN RX {format_frame(frame)}\n")
+            self._append_log("rx", f"CAN RX {format_frame(frame)}\n", "can")
             node_id, uid = device
             first_detection = self.can_uid is None
             self.can_uid = uid
             if first_detection:
                 self.can_enumeration_generation += 1
-                self._append_log("event", f"CAN node {node_id} UID=0x{uid:016X}\n")
+                self._append_log("event", f"CAN node {node_id} UID=0x{uid:016X}\n", "can")
                 transport = self.can_transport
                 if transport is not None:
                     try:
                         transport.set_active_report(True)
                     except (serial.SerialException, OSError, RuntimeError) as exc:
-                        self._append_log("error", f"USB-CAN report setup failed: {exc}\n")
+                        self._append_log("error", f"USB-CAN report setup failed: {exc}\n", "can")
             self._update_control_state()
             return
         feedback = parse_feedback(frame)
@@ -1634,7 +1381,7 @@ class EasyMotorApp(tk.Tk):
             self.can_last_feedback_time = now
             if now - self.can_last_feedback_log_time >= 0.25:
                 self.can_last_feedback_log_time = now
-                self._append_log("rx", f"CAN RX {format_frame(frame)}\n")
+                self._append_log("rx", f"CAN RX {format_frame(frame)}\n", "can")
             if feedback.mode == MODE_RESET:
                 self.mci_state = 0
             elif feedback.mode == MODE_CALIBRATING:
@@ -1647,12 +1394,17 @@ class EasyMotorApp(tk.Tk):
                 f"CAN mode={feedback.mode} faults=0x{feedback.faults:02X} "
                 f"pos={feedback.position_rad:.4f} rad vel={feedback.velocity_rad_s:.4f} rad/s"
             )
+            self.can_feedback_var.set(
+                f"CAN Type 2: mode={feedback.mode} faults=0x{feedback.faults:02X} "
+                f"pos={feedback.position_rad:.4f} rad vel={feedback.velocity_rad_s:.4f} rad/s "
+                f"torque={feedback.torque_nm:.4f} Nm temp={feedback.temperature_c:.1f} °C"
+            )
             if feedback.faults and self._motor_activity_active() and not self.stop_pending:
-                self._append_log("error", "CAN feedback reported a fault; requesting stop.\n")
+                self._append_log("error", "CAN feedback reported a fault; requesting stop.\n", "can")
                 self.stop_motor()
             self._update_control_state()
             return
-        self._append_log("rx", f"CAN RX {format_frame(frame)}\n")
+        self._append_log("rx", f"CAN RX {format_frame(frame)}\n", "can")
         fault = parse_fault_report(frame)
         if fault is not None:
             self._append_log(
@@ -1669,6 +1421,7 @@ class EasyMotorApp(tk.Tk):
             self.mci_state = int(match.group(1))
             name = MCI_NAMES.get(self.mci_state, "其他")
             self.state_var.set(f"MCI: {self.mci_state} ({name})")
+            self.rs485_state_var.set(f"RS485 MCI: {self.mci_state} ({name})")
             if self.mci_state == 0 and self.stop_pending:
                 self.stop_pending = False
                 self._append_log("event", "已由 MCI 状态确认电机停止。\n")
@@ -1679,49 +1432,32 @@ class EasyMotorApp(tk.Tk):
             ):
                 self.pulse_active = False
                 self.continuous_active = False
-                self.nonzero_iq_active = False
+                self.motion_command_active = False
                 self.demo_service.cancel()
-                self.auto_keep_var.set(False)
-                self._update_keepalive_label()
+                self.command_refresh_var.set("CAN command refresh: idle")
                 self._append_log(
                     "error",
-                    "MCU 已主动退出 RUN，测试和 Keepalive 已停止。\n",
+                    "MCU 已主动退出 RUN，CAN 命令刷新已停止。\n",
                 )
-                if self.acc_active and self.acc_phase == "speed":
-                    self.acc_data[-1]["watchdog"] = True
             self._update_control_state()
 
         if "CMD start rejected" in line:
             self.start_waiting = False
             self.demo_service.cancel()
             self._append_log("error", "启动被 MCU 拒绝，请查询故障状态。\n")
-            if self.sequence_active and self.sequence_step in (0, 3):
-                self._sequence_abort("启动被拒绝")
-            if self.acc_active and self.acc_phase == "start":
-                self._acc_abort("启动被拒绝")
         if "CMD iq rejected" in line:
-            self.nonzero_iq_active = False
+            self.motion_command_active = False
             self.pulse_active = False
-            self._update_keepalive_label()
+            self.command_refresh_var.set("CAN command refresh: idle")
         if "CMD speed rejected" in line:
-            self.nonzero_iq_active = False
+            self.motion_command_active = False
             self.pulse_active = False
-            self._update_keepalive_label()
-            if self.acc_active and self.acc_phase == "speed":
-                self._acc_abort("速度命令被 MCU 拒绝")
-        if "CMD keep rejected" in line and self.pulse_active:
-            self.pulse_active = False
-            self.nonzero_iq_active = False
-            self._update_keepalive_label()
-            self._append_log(
-                "error", "Keepalive 被 MCU 拒绝，定时脉冲已在上位机侧终止。\n"
-            )
+            self.command_refresh_var.set("CAN command refresh: idle")
         if "CMD stop accepted" in line:
             self.stop_pending = False
-            self.nonzero_iq_active = False
+            self.motion_command_active = False
             self.pulse_active = False
-            self.auto_keep_var.set(False)
-            self._update_keepalive_label()
+            self.command_refresh_var.set("CAN command refresh: idle")
 
         pwm_test = PWM_TEST_RE.search(line)
         if pwm_test:
@@ -1734,52 +1470,6 @@ class EasyMotorApp(tk.Tk):
             self._freq_foc_hz = int(encoder_rt.group(2))
             self._update_freq_label()
 
-        if CAN_READY_RE.search(line):
-            self.can_ready = True
-            self._update_can_label()
-        node_id_match = CAN_NODE_ID_RE.search(line)
-        if node_id_match:
-            self.can_node_id = int(node_id_match.group(1))
-            self._update_can_label()
-        master_id_match = CAN_MASTER_ID_RE.search(line)
-        if master_id_match:
-            self.can_master_id = int(master_id_match.group(1))
-            self._update_can_label()
-        id_field = CAN_STATUS_ID_RE.match(line)
-        if id_field:
-            if id_field.group(1) == "node_id":
-                self.can_node_id = int(id_field.group(2))
-            else:
-                self.can_master_id = int(id_field.group(2))
-            self._update_can_label()
-        field = CAN_STATUS_FIELD_RE.match(line)
-        if field:
-            key = field.group(1)
-            value = int(field.group(2))
-            if key == "normal":
-                self.can_normal = value != 0
-            elif key == "rx_frames":
-                self.can_rx_frames = value
-            elif key == "tx_requests":
-                self.can_tx_requests = value
-            elif key == "tx_fail":
-                self.can_tx_fail = value
-            elif key == "tx_err_cnt":
-                self.can_tx_err = value
-            elif key == "rx_err_cnt":
-                self.can_rx_err = value
-            elif key == "bus_off":
-                self.can_bus_off = value
-            elif key == "accepted":
-                self.can_accepted = value
-            elif key == "active_report":
-                self.can_active_report = value != 0
-            self._update_can_label()
-        if CAN_CODEC_PASS_RE.search(line):
-            self._append_log("event", "CAN 编解码自检通过\n")
-        elif CAN_CODEC_FAIL_RE.search(line):
-            self._append_log("error", "CAN 编解码自检失败\n")
-
         torque = TORQUE_CMD_RE.search(line)
         if torque:
             state = int(torque.group(1))
@@ -1791,12 +1481,6 @@ class EasyMotorApp(tk.Tk):
                 f"err={format_torque_error(error)} ({error}) "
                 f"cmd={command_count} timeout={timeout_count}"
             )
-            if (
-                self.acc_active
-                and self.acc_phase == "speed"
-                and (timeout_count > 0 or (error & 2))
-            ):
-                self.acc_data[-1]["watchdog"] = True
 
         motion = MOTION_RE.search(line)
         if motion:
@@ -1845,12 +1529,6 @@ class EasyMotorApp(tk.Tk):
                 f"{output_rpm:.2f} output rpm，误差={error_cps}，"
                 f"积分Iq={integral_iq}，控制错误={control_error}"
             )
-            if (
-                self.acc_active
-                and self.acc_phase == "speed"
-                and (control_error & 2)
-            ):
-                self.acc_data[-1]["watchdog"] = True
 
         trace = SPEED_TRACE_RE.search(line)
         if trace:
@@ -1884,18 +1562,6 @@ class EasyMotorApp(tk.Tk):
                 f"Iq/Id={measured_iq}/{measured_id}，"
                 f"Vq/Vd={voltage_q}/{voltage_d}，斜坡={applied_cps}"
             )
-            if (
-                self.acc_active
-                and self.acc_phase == "speed"
-                and self.acc_data
-            ):
-                trace_record = self.acc_data[-1]["traces"]
-                trace_record.append(  # type: ignore[union-attr]
-                    (
-                        elapsed_ms, target_cps, applied_cps, measured_cps,
-                        average_cps, minimum_cps, maximum_cps,
-                    )
-                )
 
         runtime = RT_RE.search(line)
         if runtime:
@@ -1968,23 +1634,6 @@ class EasyMotorApp(tk.Tk):
             parts.append(f"ENC_RT {self._freq_enc_rt_hz} kHz")
         self.freq_var.set(" | ".join(parts) if parts else "PWM/FOC: 未知")
 
-    def _update_can_label(self) -> None:
-        """Compose the compact CAN node status label."""
-        if not self.can_ready:
-            self.can_status_var.set("CAN: 未初始化")
-            return
-        mode = "正常模式" if self.can_normal else "待机(静默)"
-        node = f"0x{self.can_node_id:X}" if self.can_node_id is not None else "?"
-        master = f"0x{self.can_master_id:X}" if self.can_master_id is not None else "?"
-        report = "开" if self.can_active_report else "关"
-        self.can_status_var.set(
-            f"CAN 就绪 | 节点={node} 主机={master} | {mode} "
-            f"| RX {self.can_rx_frames} TX {self.can_tx_requests} "
-            f"(TX失败 {self.can_tx_fail}) "
-            f"| 错误 T/R={self.can_tx_err}/{self.can_rx_err} "
-            f"| BusOff {self.can_bus_off} | 上报 {report}"
-        )
-
     def _update_health_label(self, fragment: str) -> None:
         """Merge RT and ENC health fragments into one compact label."""
         if fragment.startswith("RT t="):
@@ -2003,13 +1652,6 @@ class EasyMotorApp(tk.Tk):
     def _render_eangle_summary(
         self, bins: list[tuple[int, ...]]
     ) -> None:
-        if (
-            self.acc_active
-            and self.acc_phase in ("idle", "eang")
-            and self.acc_data
-            and not self.acc_data[-1]["eang_bins"]
-        ):
-            self.acc_data[-1]["eang_bins"] = list(bins)
         lines = ["EANG_RIPPLE 12-bin 摘要（停机后诊断）:"]
         worst: tuple[int, int] | None = None
         for values in bins:
@@ -2040,10 +1682,7 @@ class EasyMotorApp(tk.Tk):
     def send_command(self, command: str, quiet: bool = False,
                      strict_quiet: bool = False) -> bool:
         normalized = command.strip().lower()
-        diagnostic_command = (
-            normalized in {"status", "help", "can status", "can codec"}
-            or normalized.startswith("wave ")
-        )
+        diagnostic_command = normalized == "status" or normalized.startswith("wave ")
         if not diagnostic_command:
             if not quiet:
                 self._append_log(
@@ -2090,21 +1729,11 @@ class EasyMotorApp(tk.Tk):
                 self.serial_port.write(payload)
                 self.serial_port.flush()
         except (serial.SerialException, serial.SerialTimeoutException, OSError) as exc:
-            self._append_log("error", f"发送失败: {exc}\n")
+            self._append_log("error", f"发送失败: {exc}\n", "rs485")
             return False
         if not quiet:
-            self._append_log("tx", f"TX  {command.strip()}\n")
+            self._append_log("tx", f"TX  {command.strip()}\n", "rs485")
         return True
-
-    def start_scope_hold(self) -> None:
-        """Send the 100 kHz fixed-duty scope hold command."""
-        offset = max(5, min(150, self.hold_offset_var.get()))
-        self.hold_offset_var.set(offset)
-        if self.send_command(f"hold {offset}"):
-            self._append_log(
-                "event",
-                f"已发送固定占空比保持 hold {offset}‰；PWM 持续输出，按停止退出。\n",
-            )
 
     def toggle_wave_stream(self) -> None:
         """Start/stop the firmware ADC phase-current waveform stream."""
@@ -2506,20 +2135,14 @@ class EasyMotorApp(tk.Tk):
         self.after(50, self._wave_redraw)
 
     def start_motor(self) -> bool:
-        if self.sequence_active:
-            messagebox.showwarning("序列进行中", "请先中止 Stage-I 探测序列。")
+        if self.can_transport is None:
             return False
-        if self.active_interface == "can":
-            if self.can_transport is None:
-                return False
-            try:
-                self.can_transport.enable()
-            except (serial.SerialException, OSError, RuntimeError) as exc:
-                self._append_log("error", f"CAN enable failed: {exc}\n")
-                return False
-            self._append_log("event", "CAN Type 3 enable sent; waiting for Type 2 MOTOR feedback.\n")
-        elif not self.send_command("start"):
+        try:
+            self.can_transport.enable()
+        except (serial.SerialException, OSError, RuntimeError) as exc:
+            self._append_log("error", f"CAN enable failed: {exc}\n")
             return False
+        self._append_log("event", "CAN Type 3 enable sent; waiting for Type 2 MOTOR feedback.\n")
         self.start_waiting = True
         self.start_deadline = time.monotonic() + START_TIMEOUT_MS / 1000.0
         self.state_var.set("MCI: 正在启动/对齐（被动监听）…")
@@ -2558,80 +2181,29 @@ class EasyMotorApp(tk.Tk):
             self._update_control_state()
             return
 
-    def _validated_iq(self) -> int | None:
-        try:
-            value = int(self.iq_var.get())
-        except (tk.TclError, ValueError):
-            messagebox.showwarning("Iq 无效", "请输入 1 到 100 的整数。")
-            return None
-        if not 1 <= value <= MAX_IQ_LSB:
-            messagebox.showwarning("Iq 超限", "当前调试阶段只允许 1 到 100 LSB。")
-            return None
-        return value
-
-    def apply_iq(self, direction: int) -> None:
-        value = self._validated_iq()
-        if value is None:
-            return
-        if self.mci_state != 6:
-            messagebox.showwarning("尚未 RUN", "请先启动，并等待 MCI 进入 RUN。")
-            return
-        self.send_iq(direction * value)
-
-    def send_iq(self, value: int) -> bool:
-        if self.send_command(f"iq {value}"):
-            self.nonzero_iq_active = value != 0
-            if value == 0:
-                self.auto_keep_var.set(False)
-            self._update_keepalive_label()
-            return True
-        return False
-
-    def _validated_speed(self) -> int | None:
-        try:
-            value = int(self.speed_var.get())
-        except (tk.TclError, ValueError):
-            messagebox.showwarning("速度无效", "请输入 1 到 20 rpm 的整数。")
-            return None
-        if not 1 <= value <= MAX_SPEED_RPM:
-            messagebox.showwarning("速度超限", "当前阶段只允许 1 到 20 motor rpm。")
-            return None
-        return value
-
     def send_speed(self, value: int) -> bool:
-        sent = False
-        if self.active_interface == "can":
-            if self.can_transport is None:
-                return False
-            try:
-                self.can_transport.command_velocity(value)
-                self.can_command_rpm = value
-                sent = True
-            except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
-                self._append_log("error", f"CAN velocity command failed: {exc}\n")
+        if self.can_transport is None:
+            return False
+        try:
+            self.can_transport.command_velocity(value)
+            self.can_command_rpm = value
+        except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
+            self._append_log("error", f"CAN velocity command failed: {exc}\n")
+            return False
+        self.motion_command_active = value != 0
+        if value == 0:
+            self.continuous_active = False
+            self.command_refresh_var.set("CAN command refresh: idle")
         else:
-            sent = self.send_command(f"speed {value}")
-        if sent:
-            self.nonzero_iq_active = value != 0
-            if value == 0:
-                self.auto_keep_var.set(False)
-                self.continuous_active = False
-            self._update_keepalive_label()
-            return True
-        return False
+            self.command_refresh_var.set("CAN command refresh: active")
+        return True
 
     def start_continuous_speed(
         self,
         direction: int,
-        value: int | None = None,
+        value: int,
     ) -> None:
-        """Run speed continuously until the user presses stop. Keepalive is
-        refreshed automatically every 300 ms, so the firmware command watchdog
-        never fires; suitable for the >=10 min long-run acceptance."""
-        if value is None:
-            value = self._validated_speed()
-        if value is None:
-            return
+        """Run at a safe demo speed until the user presses stop."""
         if self.mci_state != 6:
             messagebox.showwarning("尚未 RUN", "请先启动，并等待 MCI 进入 RUN。")
             return
@@ -2642,27 +2214,21 @@ class EasyMotorApp(tk.Tk):
         if not self.send_speed(command_rpm):
             return
         self.continuous_active = True
-        self.keep_status_var.set(
-            f"持续速度运行: {command_rpm} motor rpm，自动 keep，按停止结束"
+        self.command_refresh_var.set(
+            f"CAN command refresh: continuous {command_rpm} motor rpm"
         )
         self._append_log(
             "event",
-            f"持续速度运行开始: {command_rpm} motor rpm，自动 keep 250ms；"
+            f"持续速度运行开始: {command_rpm} motor rpm，CAN Type 1 每 250 ms 刷新；"
             "按“停止”结束。\n",
         )
 
     def start_timed_speed(
         self,
         direction: int,
-        value: int | None = None,
-        duration_ms: int | None = None,
+        value: int,
+        duration_ms: int,
     ) -> None:
-        if value is None:
-            value = self._validated_speed()
-        if duration_ms is None:
-            duration_ms = self._validated_pulse_duration()
-        if value is None or duration_ms is None:
-            return
         if self.mci_state != 6:
             messagebox.showwarning("尚未 RUN", "请先启动，并等待 MCI 进入 RUN。")
             return
@@ -2674,52 +2240,12 @@ class EasyMotorApp(tk.Tk):
             return
         self.pulse_active = True
         self.pulse_deadline = time.monotonic() + duration_ms / 1000.0
-        self.keep_status_var.set(
-            f"定时速度测试: {command_rpm} motor rpm，{duration_ms} ms"
+        self.command_refresh_var.set(
+            f"CAN command refresh: timed {command_rpm} motor rpm, {duration_ms} ms"
         )
         self._append_log(
             "event",
             f"定时速度测试开始: {command_rpm} motor rpm，{duration_ms} ms。\n",
-        )
-        self.after(20, self._pulse_watchdog_tick)
-
-    def _validated_pulse_duration(self) -> int | None:
-        try:
-            duration_ms = int(self.pulse_duration_var.get())
-        except (tk.TclError, ValueError):
-            messagebox.showwarning("时长无效", "请输入 500 到 5000 ms。")
-            return None
-        if not 500 <= duration_ms <= 5000:
-            messagebox.showwarning("时长超限", "允许范围为 500 到 5000 ms。")
-            return None
-        return duration_ms
-
-    def start_timed_pulse(
-        self,
-        direction: int,
-        value: int | None = None,
-        duration_ms: int | None = None,
-    ) -> None:
-        if value is None:
-            value = self._validated_iq()
-        if duration_ms is None:
-            duration_ms = self._validated_pulse_duration()
-        if value is None or duration_ms is None:
-            return
-        if self.mci_state != 6:
-            messagebox.showwarning("尚未 RUN", "请先启动，并等待 MCI 进入 RUN。")
-            return
-        if self.pulse_active:
-            messagebox.showwarning("脉冲进行中", "请等待当前脉冲结束或点击停止。")
-            return
-        if not self.send_iq(direction * value):
-            return
-        self.pulse_active = True
-        self.pulse_deadline = time.monotonic() + duration_ms / 1000.0
-        self.keep_status_var.set(f"定时脉冲: {duration_ms} ms，自动 Keepalive")
-        self._append_log(
-            "event",
-            f"定时脉冲开始: Iq={direction * value} LSB, {duration_ms} ms。\n",
         )
         self.after(20, self._pulse_watchdog_tick)
 
@@ -2728,417 +2254,17 @@ class EasyMotorApp(tk.Tk):
             return
         if (not self.connected) or (time.monotonic() >= self.pulse_deadline):
             self._append_log("event", "定时测试结束，发送 stop。\n")
-            self.stop_motor(cancel_sequence=False)
+            self.stop_motor()
             return
         self.after(20, self._pulse_watchdog_tick)
 
-    # ------------------------------------------------------------------
-    # Stage-I bidirectional probe: start -> +rpm (auto keep) -> stop
-    #                                 -> -rpm (auto keep) -> stop
-    # ------------------------------------------------------------------
-
-    def run_stage_i_probe(self) -> None:
-        if self.sequence_active:
-            messagebox.showwarning("序列进行中", "请先中止当前序列。")
-            return
-        value = self._validated_speed()
-        duration_ms = self._validated_pulse_duration()
-        if value is None or duration_ms is None:
-            return
-        if self.mci_state not in (None, 0):
-            messagebox.showwarning("未在 IDLE", "请先停止电机再启动双向探测。")
-            return
-        self.sequence_active = True
-        self.sequence_step = 0
-        self.sequence_speed = value
-        self.sequence_duration_ms = duration_ms
-        self.sequence_deadline = time.monotonic() + SEQ_WAIT_RUN_TIMEOUT_MS / 1000.0
-        self.sequence_var.set("Stage-I 探测: 发送 start，等待 RUN …")
-        self._append_log(
-            "event",
-            "Stage-I 双向探测开始: start → "
-            f"{value:+d} rpm × {duration_ms} ms → stop → "
-            f"start → {-value:+d} rpm × {duration_ms} ms → stop。\n",
-        )
-        if not self.send_command("start"):
-            self.sequence_active = False
-            self.sequence_var.set("Stage-I 探测: 空闲")
-            return
-        self._update_control_state()
-        self.after(SEQ_TICK_MS, self._sequence_tick)
-
-    # ------------------------------------------------------------------
-    # Stage-I full acceptance: one click runs +10 / -10 / +20 / -20 rpm,
-    # each start -> timed speed (auto keep) -> stop -> EANG collection,
-    # then prints a per-step PASS/FAIL summary.
-    # ------------------------------------------------------------------
-
-    def run_stage_i_acceptance(self) -> None:
-        if self.acc_active or self.sequence_active:
-            messagebox.showwarning("序列进行中", "请先中止当前序列。")
-            return
-        if self.mci_state not in (None, 0):
-            messagebox.showwarning("未在 IDLE", "请先停止电机再开始完整验收。")
-            return
-        duration_ms = self._validated_pulse_duration()
-        if duration_ms is None:
-            return
-        try:
-            speeds = [
-                int(part.strip())
-                for part in self.acc_speeds_var.get().split(",")
-                if part.strip()
-            ]
-        except ValueError:
-            messagebox.showwarning(
-                "档位无效", "请用逗号分隔正整数，如 10,20。"
-            )
-            return
-        if not speeds or any(not 1 <= value <= MAX_SPEED_RPM for value in speeds):
-            messagebox.showwarning(
-                "档位超限", f"每档速度须在 1..{MAX_SPEED_RPM} motor rpm。"
-            )
-            return
-        schedule: list[tuple[int, int]] = []
-        for value in speeds:
-            schedule.append((+value, duration_ms))
-            schedule.append((-value, duration_ms))
-        self.acc_schedule = schedule
-        self.acc_index = 0
-        self.acc_data = []
-        self.acc_active = True
-        self.acc_phase = "start"
-        self.acc_deadline = time.monotonic() + SEQ_WAIT_RUN_TIMEOUT_MS / 1000.0
-        self.acc_started_mono = time.monotonic()
-        self.eangle_bins = []
-        self.eangle_pending = False
-        self.sequence_var.set("Stage-I 完整验收: 发送 start，等待 RUN …")
-        self._append_log(
-            "event",
-            "Stage-I 完整验收开始: "
-            + " → ".join(
-                f"{rpm:+d} rpm×{d} ms" for rpm, d in schedule
-            )
-            + "。每档自动 keep、自动 stop。\n",
-        )
-        if not self.send_command("start"):
-            self.acc_active = False
-            self.sequence_var.set("Stage-I 完整验收: 空闲")
-            return
-        self._update_control_state()
-        self.after(SEQ_TICK_MS, self._acceptance_tick)
-
-    def _acceptance_tick(self) -> None:
-        if not self.acc_active:
-            return
-        if not self.connected:
-            self._acc_abort("串口已断开")
-            return
-        if self.acc_phase == "start":
-            if self.mci_state == 6:
-                self._acc_begin_speed()
-            elif time.monotonic() >= self.acc_deadline:
-                self._acc_abort("等待 RUN 超时")
-                return
-        elif self.acc_phase == "speed":
-            # Normal end is signalled by the pulse watchdog having stopped
-            # the motor (pulse_active cleared); an unexpected early exit was
-            # already flagged as watchdog in _parse_status_line.
-            if not self.pulse_active:
-                self.acc_phase = "idle"
-                self.acc_deadline = (
-                    time.monotonic() + SEQ_WAIT_IDLE_TIMEOUT_MS / 1000.0
-                )
-                self.sequence_var.set(
-                    f"Stage-I 完整验收: 第 {self.acc_index + 1}/"
-                    f"{len(self.acc_schedule)} 档已停，等待 IDLE …"
-                )
-        elif self.acc_phase == "idle":
-            if self.mci_state == 0:
-                self.acc_phase = "eang"
-                self.acc_eang_deadline = (
-                    time.monotonic() + EANG_COLLECT_TIMEOUT_S
-                )
-                self.sequence_var.set(
-                    f"Stage-I 完整验收: 收集第 {self.acc_index + 1} 档 EANG 数据 …"
-                )
-            elif time.monotonic() >= self.acc_deadline:
-                self._acc_abort("停止超时")
-                return
-        elif self.acc_phase == "eang":
-            eang_done = bool(self.acc_data[-1]["eang_bins"])
-            if eang_done or time.monotonic() >= self.acc_eang_deadline:
-                self._acc_finish_phase(eang_done)
-                self.after(SEQ_TICK_MS, self._acceptance_tick)
-                return
-        self.after(SEQ_TICK_MS, self._acceptance_tick)
-
-    def _acc_begin_speed(self) -> None:
-        rpm, duration_ms = self.acc_schedule[self.acc_index]
-        self.acc_data.append(
-            {
-                "rpm": rpm,
-                "duration_ms": duration_ms,
-                "traces": [],
-                "watchdog": False,
-                "eang_bins": [],
-            }
-        )
-        self.acc_phase = "speed"
-        self.eangle_bins = []
-        self.eangle_pending = False
-        self.sequence_var.set(
-            f"Stage-I 完整验收: 第 {self.acc_index + 1}/"
-            f"{len(self.acc_schedule)} 档 {rpm:+d} rpm × "
-            f"{duration_ms} ms（自动 keep）"
-        )
-        direction = 1 if rpm > 0 else -1
-        self.start_timed_speed(
-            direction, value=abs(rpm), duration_ms=duration_ms
-        )
-
-    def _acc_finish_phase(self, eang_received: bool) -> None:
-        record = self.acc_data[self.acc_index]
-        traces: list[tuple[int, ...]] = record["traces"]  # type: ignore
-        watchdog: bool = record["watchdog"]  # type: ignore
-        target_cps = abs(record["rpm"]) * ENCODER_COUNTS_PER_REV / 60.0
-        reasons: list[str] = []
-        if watchdog:
-            reasons.append("看门狗/命令超时停机")
-        avg_cps = 0.0
-        min_cps = 0
-        max_cps = 0
-        if traces:
-            _, _, _, _, last_avg, last_min, last_max = traces[-1]
-            avg_cps = float(last_avg)
-            min_cps = int(last_min)
-            max_cps = int(last_max)
-            # measured avg keeps the direction sign (negative in reverse);
-            # compare magnitudes so a reverse run is evaluated against the
-            # same target as the forward run.
-            error_ratio = (
-                abs(avg_cps) / abs(target_cps)
-                if target_cps != 0.0
-                else float("inf")
-            )
-            deviation = abs(1.0 - error_ratio)
-            if deviation > 0.30:
-                reasons.append(
-                    f"平均速度偏差 {deviation * 100:.1f}%"
-                    "（目标 ±30% 内）"
-                )
-        else:
-            reasons.append("无 SPEED_TRACE 数据")
-        eang_bins: list[tuple[int, ...]] = record["eang_bins"]  # type: ignore
-        passed = not reasons
-        avg_rpm = avg_cps * 60.0 / ENCODER_COUNTS_PER_REV
-        lines = [
-            f"验收第 {self.acc_index + 1}/{len(self.acc_schedule)} 档: "
-            f"{record['rpm']:+d} rpm → {'PASS' if passed else 'FAIL'}"
-        ]
-        lines.append(
-            f"  目标 {target_cps:.0f} count/s；avg {avg_cps:.0f}"
-            f"（{avg_rpm:+.2f} rpm）；min/max {min_cps}..{max_cps} count/s"
-        )
-        for reason in reasons:
-            lines.append(f"  失败原因: {reason}")
-        if eang_received and eang_bins:
-            total_samples = sum(values[3] for values in eang_bins)
-            worst = max(eang_bins, key=lambda values: abs(values[6]))
-            lines.append(
-                f"  EANG: {len(eang_bins)}/{EANG_BIN_COUNT} "
-                f"bins, total samples {total_samples}, "
-                f"worst bin {worst[0]:02d} "
-                f"({worst[1]:d}-{worst[2]:d} deg) err={worst[7]} count/s"
-            )
-        else:
-            lines.append(
-                "  EANG: no RIPPLE data received within "
-                f"{EANG_COLLECT_TIMEOUT_S:.0f}s "
-                "(not a FAIL, informational only)"
-            )
-        self._append_log("event", "\n".join(lines) + "\n")
-        self.acc_index += 1
-        if self.acc_index < len(self.acc_schedule):
-            # Continue with the next segment: re-start the motor and wait for
-            # RUN (the alignment zero is reused on later starts).
-            self.acc_phase = "start"
-            self.acc_deadline = (
-                time.monotonic() + SEQ_WAIT_RUN_TIMEOUT_MS / 1000.0
-            )
-            self.sequence_var.set(
-                f"Stage-I 完整验收: 第 {self.acc_index + 1}/"
-                f"{len(self.acc_schedule)} 档，发送 start …"
-            )
-            if not self.send_command("start"):
-                self._acc_abort("下一档 start 发送失败")
-                return
-        else:
-            self._acc_summarize_all()
-
-    def _acc_pass(self, record: dict[str, object]) -> bool:
-        traces: list[tuple[int, ...]] = record["traces"]  # type: ignore
-        if record["watchdog"] or not traces:
-            return False
-        target_cps = abs(record["rpm"]) * ENCODER_COUNTS_PER_REV / 60.0
-        error_ratio = (
-            abs(float(traces[-1][4])) / abs(target_cps)
-            if target_cps != 0.0
-            else float("inf")
-        )
-        return abs(1.0 - error_ratio) <= 0.30
-
-    def _acc_summarize_all(self) -> None:
-        passed_count = sum(
-            1 for record in self.acc_data if self._acc_pass(record)
-        )
-        failed = [
-            f"{record['rpm']:+d} rpm"
-            for record in self.acc_data
-            if not self._acc_pass(record)
-        ]
-        elapsed_s = time.monotonic() - self.acc_started_mono
-        self.acc_active = False
-        self.acc_phase = "done"
-        self.sequence_var.set(
-            f"Stage-I 完整验收: 完成（{passed_count}/{len(self.acc_data)} 通过）"
-        )
-        summary = (
-            f"Stage-I 完整验收完成: {passed_count}/{len(self.acc_data)} 档通过"
-        )
-        if failed:
-            summary += f"，失败: {', '.join(failed)}。"
-        else:
-            summary += "，全部通过。"
-        summary += f"总耗时约 {elapsed_s:.0f} s。\n"
-        self._append_log("event", summary)
-        self._update_control_state()
-
-    def _acc_abort(self, reason: str) -> None:
-        self.acc_active = False
-        self.sequence_var.set(f"Stage-I 完整验收: 中止（{reason}）")
-        self._append_log("error", f"Stage-I 完整验收中止: {reason}\n")
-        self.stop_motor()
-        self._update_control_state()
-
-    def _sequence_tick(self) -> None:
-        if not self.sequence_active:
-            return
-        if not self.connected:
-            self._sequence_abort("串口已断开")
-            return
-        if self.sequence_step == 0:  # wait for RUN
-            if self.mci_state == 6:
-                self.sequence_step = 1
-                self._begin_sequence_phase()
-            elif time.monotonic() >= self.sequence_deadline:
-                self._sequence_abort("等待 RUN 超时")
-                return
-        elif self.sequence_step == 1:  # forward timed speed active
-            if not self.pulse_active:
-                self.sequence_step = 2
-                self.sequence_deadline = (
-                    time.monotonic() + SEQ_WAIT_IDLE_TIMEOUT_MS / 1000.0
-                )
-                self.sequence_var.set("Stage-I 探测: 正向已停，等待 IDLE …")
-        elif self.sequence_step == 2:  # wait for IDLE after forward
-            if self.mci_state == 0:
-                self.sequence_step = 3
-                self.sequence_deadline = (
-                    time.monotonic() + SEQ_WAIT_RUN_TIMEOUT_MS / 1000.0
-                )
-                self.sequence_var.set("Stage-I 探测: 重新 start，等待 RUN …")
-                if not self.send_command("start"):
-                    self._sequence_abort("反向 start 发送失败")
-                    return
-            elif time.monotonic() >= self.sequence_deadline:
-                self._sequence_abort("正向停止超时")
-                return
-        elif self.sequence_step == 3:  # wait for RUN after second start
-            if self.mci_state == 6:
-                self.sequence_step = 4
-                self._begin_sequence_phase()
-            elif time.monotonic() >= self.sequence_deadline:
-                self._sequence_abort("反向启动超时")
-                return
-        elif self.sequence_step == 4:  # reverse timed speed active
-            if not self.pulse_active:
-                self.sequence_step = 5
-                self.sequence_deadline = (
-                    time.monotonic() + SEQ_WAIT_IDLE_TIMEOUT_MS / 1000.0
-                )
-                self.sequence_var.set("Stage-I 探测: 反向已停，等待 IDLE …")
-        elif self.sequence_step == 5:  # wait for IDLE after reverse
-            if self.mci_state == 0:
-                self.sequence_active = False
-                self.sequence_var.set("Stage-I 探测: 完成")
-                self._append_log(
-                    "event",
-                    "Stage-I 双向探测完成。查看 SPEED_TRACE 与 EANG_RIPPLE 明细。\n",
-                )
-                self._update_control_state()
-                return
-            if time.monotonic() >= self.sequence_deadline:
-                self._sequence_abort("反向停止超时")
-                return
-        self.after(SEQ_TICK_MS, self._sequence_tick)
-
-    def _begin_sequence_phase(self) -> None:
-        if self.sequence_step == 1:
-            self.sequence_var.set(
-                f"Stage-I 探测: +{self.sequence_speed} rpm × "
-                f"{self.sequence_duration_ms} ms（自动 keep）"
-            )
-            self.start_timed_speed(
-                +1,
-                value=self.sequence_speed,
-                duration_ms=self.sequence_duration_ms,
-            )
-        elif self.sequence_step == 4:
-            self.sequence_var.set(
-                f"Stage-I 探测: {self.sequence_speed} rpm × "
-                f"{self.sequence_duration_ms} ms（自动 keep，反向）"
-            )
-            self.start_timed_speed(
-                -1,
-                value=self.sequence_speed,
-                duration_ms=self.sequence_duration_ms,
-            )
-
-    def _sequence_abort(self, reason: str) -> None:
-        self.sequence_active = False
-        self.sequence_var.set(f"Stage-I 探测: 中止（{reason}）")
-        self._append_log("error", f"Stage-I 探测中止: {reason}\n")
-        self.stop_motor()
-        self._update_control_state()
-
-    def abort_sequence(self) -> None:
-        if not self.sequence_active and not self.acc_active:
-            return
-        if self.sequence_active:
-            self.sequence_active = False
-            self.sequence_var.set("Stage-I 探测: 已手动中止")
-        if self.acc_active:
-            self.acc_active = False
-            self.sequence_var.set("Stage-I 完整验收: 已手动中止")
-        self._append_log("event", "Stage-I 探测已手动中止。\n")
-        self.stop_motor()
-        self._update_control_state()
-
-    def stop_motor(self, cancel_sequence: bool = True) -> None:
+    def stop_motor(self) -> None:
         self.demo_service.cancel()
         self.demo_view.reset_continuous()
-        if cancel_sequence and self.sequence_active:
-            self.sequence_active = False
-            self.sequence_var.set("Stage-I 探测: 已中止（手动停止）")
-        if cancel_sequence and self.acc_active:
-            self.acc_active = False
-            self.sequence_var.set("Stage-I 完整验收: 已中止（手动停止）")
         self.pulse_active = False
         self.continuous_active = False
-        self.nonzero_iq_active = False
-        self.auto_keep_var.set(False)
-        self._update_keepalive_label()
+        self.motion_command_active = False
+        self.command_refresh_var.set("CAN command refresh: idle")
         self.stop_pending = True
         self.stop_attempts = 0
         self.can_stop_not_before = time.monotonic() + 0.3
@@ -3148,23 +2274,18 @@ class EasyMotorApp(tk.Tk):
         if not self.stop_pending or not self.connected:
             return
         self.stop_attempts += 1
-        if self.active_interface == "can" and self.can_transport is not None:
+        if self.can_transport is not None:
             try:
                 self.can_transport.stop()
                 self.can_command_rpm = 0
             except (serial.SerialException, OSError, RuntimeError) as exc:
                 self._append_log("error", f"CAN stop failed: {exc}\n")
-        else:
-            self.send_command("stop", quiet=self.stop_attempts > 1)
         self.after(STOP_RETRY_INTERVAL_MS, self._stop_retry_tick)
 
     def _stop_retry_tick(self) -> None:
         if not self.stop_pending:
             return
-        if self.mci_state == 0 and (
-            self.active_interface != "can"
-            or time.monotonic() >= self.can_stop_not_before
-        ):
+        if self.mci_state == 0 and time.monotonic() >= self.can_stop_not_before:
             self.stop_pending = False
             self._append_log("event", "已确认 MCI 进入 IDLE。\n")
             return
@@ -3176,15 +2297,15 @@ class EasyMotorApp(tk.Tk):
             return
         self.stop_pending = False
         self._append_log(
-            "error", "Stop 未获得串口确认；停止 Keepalive，等待 MCU 看门狗停机。\n"
+            "error", "CAN Stop 未获得确认；停止命令刷新，等待 MCU 看门狗停机。\n"
         )
 
-    def _keepalive_tick(self) -> None:
+    def _can_command_refresh_tick(self) -> None:
         try:
             if (
                 self.connected
                 and self.active_interface == "can"
-                and self.nonzero_iq_active
+                and self.motion_command_active
                 and self.can_last_feedback_time > 0.0
                 and time.monotonic() - self.can_last_feedback_time > 0.75
             ):
@@ -3192,118 +2313,52 @@ class EasyMotorApp(tk.Tk):
                 self.stop_motor()
             if (
                 self.connected
-                and (self.auto_keep_var.get() or self.pulse_active
-                     or self.continuous_active)
-                and self.nonzero_iq_active
+                and self.active_interface == "can"
+                and (self.pulse_active or self.continuous_active)
+                and self.motion_command_active
+                and self.can_transport is not None
             ):
-                if self.active_interface == "can" and self.can_transport is not None:
-                    try:
-                        self.can_transport.command_velocity(self.can_command_rpm)
-                        refreshed = True
-                    except (ValueError, serial.SerialException, OSError, RuntimeError):
-                        refreshed = False
-                else:
-                    refreshed = self.send_command(
-                        "keep", quiet=True, strict_quiet=not self.streaming
-                    )
-                if not refreshed:
-                    self.keep_busy_retry_count += 1
-                    if self.active_interface != "can":
-                        self.after(100, self._keepalive_retry)
-                else:
-                    self.keep_sent_count += 1
+                self.can_transport.command_velocity(self.can_command_rpm)
+                self.command_refresh_count += 1
                 if self.pulse_active:
                     remaining_ms = max(
                         0, int((self.pulse_deadline - time.monotonic()) * 1000)
                     )
-                    self.keep_status_var.set(
-                        f"定时测试: 剩余约 {remaining_ms} ms，自动 Keepalive"
+                    self.command_refresh_var.set(
+                        f"CAN command refresh: timed, about {remaining_ms} ms remaining"
                     )
                 else:
-                    self.keep_status_var.set(
-                        f"Keepalive: 自动刷新中 "
-                        f"(sent={self.keep_sent_count}, "
-                        f"retry={self.keep_busy_retry_count}, "
-                        f"forced={self.keep_forced_count})"
+                    self.command_refresh_var.set(
+                        f"CAN command refresh: active (sent={self.command_refresh_count})"
                     )
-        except Exception as exc:  # never let the keep chain die silently
-            self._append_log("error", f"Keepalive 异常: {exc}\n")
-        self.after(KEEPALIVE_INTERVAL_MS, self._keepalive_tick)
-
-    def _keepalive_retry(self) -> None:
-        try:
-            if not (self.connected and self.nonzero_iq_active):
-                return
-            if self.send_command(
-                "keep", quiet=True, strict_quiet=not self.streaming
-            ):
-                self.keep_sent_count += 1
-                return
-            self.keep_busy_retry_count += 1
-            if self.keep_busy_retry_count % 10 == 0:
-                # The bus stayed busy for many retries. Log it but keep
-                # waiting: forcing a half-duplex transmission into an active
-                # burst corrupts both directions and makes things worse.
-                # With a 300 ms keep period the 1000 ms firmware watchdog
-                # still has plenty of margin for a short busy window.
-                self.keep_forced_count += 1
-                self._append_log(
-                    "warn", f"keep 总线持续繁忙 {self.keep_busy_retry_count} "
-                    "次，继续等待静默\n"
-                )
-            self.after(80, self._keepalive_retry)
         except Exception as exc:
-            self._append_log("error", f"Keepalive 重试异常: {exc}\n")
-
-    def _update_keepalive_label(self) -> None:
-        if self.auto_keep_var.get() and self.nonzero_iq_active:
-            self.keep_status_var.set("Keepalive: 自动刷新中")
-        elif self.auto_keep_var.get():
-            self.keep_status_var.set("Keepalive: 已勾选，等待非零 Iq")
-        else:
-            self.keep_status_var.set("Keepalive: 关闭")
+            self._append_log("error", f"CAN command refresh failed: {exc}\n")
+            self.stop_motor()
+        self.after(COMMAND_REFRESH_INTERVAL_MS, self._can_command_refresh_tick)
 
     def _update_control_state(self) -> None:
-        connected_state = tk.NORMAL if self.connected else tk.DISABLED
-        self.start_button.configure(
-            state=(
-                tk.NORMAL
-                if self.connected
-                and not self.start_waiting
-                and not self.sequence_active
-                and not self.acc_active
-                and self.mci_state == 0
-                else tk.DISABLED
-            )
-        )
-        torque_state = (
-            tk.NORMAL if self.connected and self.mci_state == 6 else tk.DISABLED
-        )
-        self.positive_button.configure(state=torque_state)
-        self.negative_button.configure(state=torque_state)
-        self.iq_spin.configure(state=connected_state)
-        self.speed_spin.configure(state=connected_state)
-        self.pulse_spin.configure(state=connected_state)
-        self.keep_check.configure(state=connected_state)
-        self.speed_positive_button.configure(state=torque_state)
-        self.speed_negative_button.configure(state=torque_state)
         self._render_demo_view()
 
     def clear_log(self) -> None:
         self._log_entries.clear()
-        self.log.configure(state=tk.NORMAL)
-        self.log.delete("1.0", tk.END)
-        self.log.configure(state=tk.DISABLED)
+        for widget in self.log_widgets.values():
+            widget.configure(state=tk.NORMAL)
+            widget.delete("1.0", tk.END)
+            widget.configure(state=tk.DISABLED)
         if self.log_popup_text is not None:
             self.log_popup_text.configure(state=tk.NORMAL)
             self.log_popup_text.delete("1.0", tk.END)
             self.log_popup_text.configure(state=tk.DISABLED)
 
-    def _append_log(self, tag: str, text: str) -> None:
+    def _append_log(self, tag: str, text: str, channel: str | None = None) -> None:
+        channel = channel or self._active_log_channel
+        if channel not in {"can", "rs485", "app"}:
+            channel = "app"
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self._log_entries.append((tag, timestamp, text))
-        line = f"[{timestamp}] {self._ui(text)}"
-        self._append_log_widget(self.log, tag, line)
+        self._log_entries.append((channel, tag, timestamp, text))
+        line = f"[{timestamp}] [{channel.upper()}] {self._ui(text)}"
+        self._append_log_widget(self.log_widgets["all"], tag, line)
+        self._append_log_widget(self.log_widgets[channel], tag, line)
         if self.log_popup_text is not None:
             try:
                 self._append_log_widget(self.log_popup_text, tag, line)
@@ -3312,17 +2367,34 @@ class EasyMotorApp(tk.Tk):
                 self.log_popup = None
 
     def _rerender_logs(self) -> None:
-        widgets = [self.log]
-        if self.log_popup_text is not None:
-            widgets.append(self.log_popup_text)
-        for widget in widgets:
+        for channel, widget in self.log_widgets.items():
             try:
                 widget.configure(state=tk.NORMAL)
                 widget.delete("1.0", tk.END)
-                for tag, timestamp, source in self._log_entries:
-                    widget.insert(tk.END, f"[{timestamp}] {self._ui(source)}", tag)
+                for source_channel, tag, timestamp, source in self._log_entries:
+                    if channel != "all" and channel != source_channel:
+                        continue
+                    widget.insert(
+                        tk.END,
+                        f"[{timestamp}] [{source_channel.upper()}] {self._ui(source)}",
+                        tag,
+                    )
                 widget.see(tk.END)
                 widget.configure(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+        if self.log_popup_text is not None:
+            try:
+                self.log_popup_text.configure(state=tk.NORMAL)
+                self.log_popup_text.delete("1.0", tk.END)
+                for channel, tag, timestamp, source in self._log_entries:
+                    self.log_popup_text.insert(
+                        tk.END,
+                        f"[{timestamp}] [{channel.upper()}] {self._ui(source)}",
+                        tag,
+                    )
+                self.log_popup_text.see(tk.END)
+                self.log_popup_text.configure(state=tk.DISABLED)
             except tk.TclError:
                 pass
 
@@ -3391,17 +2463,28 @@ class EasyMotorApp(tk.Tk):
             self.log_popup = None
             self.log_popup_text = None
 
-    def open_can_tool_window(self) -> None:
-        if self.can_tool_window is not None:
-            try:
-                if self.can_tool_window.winfo_exists():
-                    self.can_tool_window.deiconify()
-                    self.can_tool_window.lift()
-                    self.can_tool_window.focus_force()
-                    return
-            except tk.TclError:
-                pass
-        self.can_tool_window = CanToolWindow(self, language_var=self.language_var)
+    def _parameter_connection_ready(self) -> bool:
+        return bool(
+            self.connected
+            and self.active_interface == "can"
+            and self.can_transport is not None
+            and self.can_uid is not None
+        )
+
+    def _parameter_operation_idle(self) -> bool:
+        return bool(
+            self.mci_state == 0
+            and not self._motor_activity_active()
+            and not self.stop_pending
+        )
+
+    def _send_parameter_frame(self, frame: CanFrame) -> None:
+        transport = self.can_transport
+        if not self._parameter_connection_ready() or transport is None:
+            raise RuntimeError("CAN Control is not connected and enumerated")
+        if not self._parameter_operation_idle():
+            raise RuntimeError("motor must remain IDLE for parameter operations")
+        transport.send(frame)
 
     def open_update_dialog(self) -> None:
         if self.update_dialog is not None:
@@ -3460,12 +2543,6 @@ class EasyMotorApp(tk.Tk):
             except tk.TclError:
                 pass
             self.update_dialog = None
-        if self.can_tool_window is not None:
-            try:
-                self.can_tool_window.close()
-            except tk.TclError:
-                pass
-            self.can_tool_window = None
         self.disconnect()
         self.quit()
         self.destroy()

@@ -36,27 +36,76 @@ class _DebugSerial:
 
 
 class AppModeInterfaceTests(unittest.TestCase):
-    def test_monitor_tab_exposes_waveform_window(self):
+    def test_advanced_rs485_controls_are_explicitly_labeled(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+
+        for label in (
+            "RS485 Debug 状态",
+            "RS485 状态",
+            "RS485 Debug 运动与 PWM 遥测",
+            "RS485 Debug 电流波形",
+        ):
+            self.assertIn(label, source)
+
+    def test_low_value_terminal_diagnostics_are_not_gui_buttons(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+        ui_start = source.index("    def _build_engineer_ui(")
+        ui_end = source.index("    def _translate_engineer_widgets(", ui_start)
+        ui_source = source[ui_start:ui_end]
+
+        self.assertNotIn('send_command("help")', ui_source)
+        self.assertNotIn('send_command("can status")', ui_source)
+        self.assertNotIn('send_command("can codec")', ui_source)
+
+    def test_parameters_reuse_main_can_transport(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+
+        self.assertIn("self.can_parameter_panel = CanParameterPanel(", source)
+        self.assertIn("send_frame=self._send_parameter_frame", source)
+        self.assertIn("transport.send(frame)", source)
+        self.assertNotIn("CanToolWindow", source)
+
+    def test_logs_are_split_by_source(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+
+        self.assertIn('(\"all\", \"全部\", \"All\")', source)
+        self.assertIn('(\"can\", \"CAN\", \"CAN\")', source)
+        self.assertIn('(\"rs485\", \"RS485 Debug\", \"RS485 Debug\")', source)
+        self.assertIn('(\"app\", \"应用\", \"Application\")', source)
+        self.assertIn('self._log_entries.append((channel, tag, timestamp, text))', source)
+
+    def test_advanced_pages_are_split_by_interface_responsibility(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+
+        for tab in (
+            "engineer_overview_tab",
+            "engineer_can_tab",
+            "engineer_rs485_tab",
+            "engineer_log_tab",
+        ):
+            self.assertIn(f"self.{tab} = ttk.Frame", source)
+        self.assertNotIn("engineer_monitor_tab", source)
+
+    def test_rs485_debug_tab_exposes_waveform_window(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
         monitor_start = source.index("motion_frame = ttk.LabelFrame(")
-        can_start = source.index("can_frame = ttk.LabelFrame(", monitor_start)
+        can_start = source.index("can_motion = ttk.LabelFrame(", monitor_start)
         monitor_source = source[monitor_start:can_start]
 
+        self.assertIn("self.engineer_rs485_tab", monitor_source)
         self.assertIn("command=self.open_wave_popup", monitor_source)
 
-    def test_engineer_can_page_has_bounded_motion_and_waveform_controls(self):
+    def test_engineer_can_page_has_only_bounded_can_motion_controls(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
         can_motion_start = source.index("can_motion = ttk.LabelFrame(")
-        hidden_controls_start = source.index(
-            "controls = ttk.Frame(self.engineer_control_tab", can_motion_start
-        )
-        can_source = source[can_motion_start:hidden_controls_start]
+        feedback_start = source.index("can_feedback = ttk.LabelFrame(", can_motion_start)
+        can_source = source[can_motion_start:feedback_start]
 
         self.assertIn("DEMO_SPEED_PRESETS_RPM", can_source)
         self.assertIn("self._start_engineer_can_run(1)", can_source)
         self.assertIn("self._start_engineer_can_run(-1)", can_source)
         self.assertIn("command=self.stop_motor", can_source)
-        self.assertIn("command=self.open_wave_popup", can_source)
+        self.assertNotIn("command=self.open_wave_popup", can_source)
 
     def test_engineer_can_run_reuses_demo_safety_service(self):
         app = object.__new__(EasyMotorApp)
@@ -124,7 +173,7 @@ class AppModeInterfaceTests(unittest.TestCase):
     def test_rs485_diagnostics_are_not_blocked_by_active_can(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
         send_start = source.index("    def send_command(")
-        send_end = source.index("    def start_scope_hold(", send_start)
+        send_end = source.index("    def toggle_wave_stream(", send_start)
         send_source = source[send_start:send_end]
 
         self.assertNotIn('if self.active_interface == "can"', send_source)
@@ -140,6 +189,23 @@ class AppModeInterfaceTests(unittest.TestCase):
 
         self.assertTrue(app.send_command("wave on 10", quiet=True))
         self.assertEqual(debug_serial.writes, [b"wave on 10\r\n"])
+
+    def test_legacy_rs485_motion_and_stage_i_controls_are_removed(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+
+        for removed in (
+            "engineer_control_tab",
+            "start_scope_hold",
+            "Stage-I 双向探测",
+            "Stage-I 完整验收",
+            "send_command(f\"speed {value}\")",
+            "send_command(\"start\")",
+            "send_command(\"keep\"",
+        ):
+            self.assertNotIn(removed, source)
+
+        self.assertIn("def _can_command_refresh_tick(self)", source)
+        self.assertIn("self.can_transport.command_velocity(self.can_command_rpm)", source)
 
     def test_can_discovery_retries_while_motor_is_unpowered(self):
         app = object.__new__(EasyMotorApp)

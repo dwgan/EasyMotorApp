@@ -13,9 +13,23 @@ EasyMotor 同时服务现场演示和工程调试：每次启动默认进入英�
 运行。演示操作固定通过 CAN 自动执行 `Type 3 → Type 1 → Type 4`。
 
 工程师模式允许 CAN 运动连接与只读 UART5/RS485 Debug 同时在线：前者负责使能、运动和停止，
-后者负责状态、波形和日志。两条链路拥有独立的端口和连接生命周期。USB-CAN 参数、长稳和协议诊断继续使用 CAN。未验证的高级
-Iq、位置等运动项保持隐藏，所有运动仍从演示页走受限 CAN 链路。
+后者负责状态、波形和日志。两条链路拥有独立的端口和连接生命周期。高级模式也提供同一套
+5/10/20 rpm CAN 安全控制，便于电机运行时同时观察波形。所有由 UART5 发出的状态、帮助、
+波形命令均在界面中明确标为 RS485 Debug。`help`、`can status` 和 `can codec` 只保留为固件
+终端诊断命令，不进入正式 GUI。参数、拒绝测试和只读长稳直接复用主 CAN transport，其中
+参数面板与 Validation Tools 均默认折叠；运动期间参数操作锁定，长稳期间运动控制锁定。
+未验证的 Iq、位置等高级
+运动项不提供，所有运动都走同一条受限 CAN 服务。
 进入或退出工程师模式前必须停止电机；高级模式不会提高软件或固件限值。
+
+高级页面按接口职责分区，避免在同一页混合控制链与调试链：
+
+```text
+Overview     只汇总两路接口与电机安全状态
+CAN Control  主 CAN 连接、受限运动控制、Type 2 反馈、折叠参数面板
+RS485 Debug  UART5 状态、遥测与波形
+Logs         All / CAN / RS485 Debug / Application 四路视图
+```
 
 ## 统一控制链
 
@@ -44,8 +58,7 @@ Type 4；MCU 的速度限幅、编码器门控和 1 秒命令看门狗仍是最�
 ## 当前目录职责
 
 ```text
-easymotor_app.py                           主启动入口和现有工程师控制器
-robot_joint_app.py                         旧入口兼容层
+easymotor_app.py                           唯一启动入口和应用控制器
 easymotor/core/safety_policy.py           演示档位、时长与计划校验
 easymotor/i18n.py                          中英文产品文本
 easymotor/services/demo_service.py        演示准备/运行状态
@@ -53,23 +66,27 @@ easymotor/services/endurance_service.py   CAN 长稳状态机
 easymotor/protocols/can_motor.py           CAN 电机协议编解码
 easymotor/transports/usb_can.py            官方 USB-CAN 传输
 easymotor/features/demo/view.py           默认演示页面
-easymotor/features/can_tool/window.py     工程师 CAN 工具窗口
+easymotor/features/can_parameters/panel.py 共享主 transport 的 CAN 参数面板
 ```
 
 Python 文件名和通用类名不包含具体电机型号。设备兼容性和协议名称仍应在界面、配置和协议
 文档中准确说明。
 
+## 已移除的历史功能
+
+主分支不再包含不可达的旧 Control 页、RS485 运动 fallback、手动 Iq 脉冲、任意速度输入、
+固定占空比 hold 或 Stage-I 自动验收状态机。RS485 运动关键字仍会被显式拒绝，这是接口安全
+防御，不是可用运动功能。旧 `robot_joint_app.py` 兼容入口也已删除。
+
 ## 后续拆分顺序
 
-当前阶段先建立双模式外壳并验证现场操作。完成界面人工验收后，再按独立提交依次从
-`easymotor_app.py` 提取：
+后续可按独立提交继续从 `easymotor_app.py` 提取：
 
 1. 串口连接与设备服务；
-2. 电机启动、速度、Iq、Keepalive 和 Stop 服务；
+2. CAN 电机启动、速度命令刷新和 Stop 服务；
 3. 遥测解析与状态模型；
-4. 自动验收功能；
-5. 波形功能；
-6. 工程日志和诊断页面。
+4. 波形功能；
+5. 工程日志和诊断页面。
 
 每次拆分必须保持现有协议字节、命令顺序、限值和硬件行为不变，并先通过软件测试，再由
 工程师进行真实台架验收。
