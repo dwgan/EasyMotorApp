@@ -16,7 +16,7 @@ from .contract import MANIFEST_NAME, UpdateManifest, UpdateRelease, parse_versio
 
 
 GITHUB_OWNER: Final = "dwgan"
-GITHUB_REPOSITORY: Final = "EasyMotor"
+GITHUB_REPOSITORY: Final = "EasyMotorApp"
 API_VERSION: Final = "2026-03-10"
 ALLOWED_HTTPS_HOSTS: Final = frozenset(
     {

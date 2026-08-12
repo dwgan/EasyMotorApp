@@ -55,7 +55,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_easymotor_releas
 ## GitHub 手动更新
 
 演示模式和高级模式底部都提供“检查更新 / Check for updates”。EasyMotor 只在用户点击时访问公开的
-`dwgan/EasyMotor` GitHub Releases，不会在启动时联网。源码运行时可以查看 Release 页面；只有打包后的
+`dwgan/EasyMotorApp` GitHub Releases，不会在启动时联网。源码运行时可以查看 Release 页面；只有打包后的
 EXE 才允许原位更新。
 
 正式稳定版本使用 `vX.Y.Z` 标签，并同时包含：

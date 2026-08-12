@@ -55,11 +55,11 @@ def manifest_payload(data: bytes) -> dict[str, object]:
 
 class UpdateContractTests(unittest.TestCase):
     def test_release_note_markdown_is_converted_to_styled_runs(self):
-        runs = inline_runs("Added **safe update** and [details](https://github.com/dwgan/EasyMotor).")
+        runs = inline_runs("Added **safe update** and [details](https://github.com/dwgan/EasyMotorApp).")
         rendered = "".join(run[0] for run in runs)
         self.assertEqual(rendered, "Added safe update and details.")
         self.assertIn(("safe update", "bold", None), runs)
-        self.assertIn(("details", "link", "https://github.com/dwgan/EasyMotor"), runs)
+        self.assertIn(("details", "link", "https://github.com/dwgan/EasyMotorApp"), runs)
 
     def test_version_comparison_is_numeric_and_strict(self):
         self.assertGreater(parse_version("v1.10.0"), parse_version("1.2.99"))
@@ -78,9 +78,9 @@ class UpdateContractTests(unittest.TestCase):
                 UpdateManifest.from_json(broken)
 
     def test_url_allowlist_rejects_http_credentials_and_foreign_hosts(self):
-        validate_download_url("https://github.com/dwgan/EasyMotor/releases/latest")
+        validate_download_url("https://github.com/dwgan/EasyMotorApp/releases/latest")
         for invalid in (
-            "http://github.com/dwgan/EasyMotor",
+            "http://github.com/dwgan/EasyMotorApp",
             "https://example.com/update.exe",
             "https://token@github.com/update.exe",
         ):
@@ -91,14 +91,14 @@ class UpdateContractTests(unittest.TestCase):
 class GitHubReleaseClientTests(unittest.TestCase):
     def _client_and_release(self, executable=b"MZ-test-update"):
         manifest = json.dumps(manifest_payload(executable)).encode("utf-8")
-        manifest_url = "https://github.com/dwgan/EasyMotor/releases/download/v1.2.3/easymotor-update.json"
-        executable_url = "https://github.com/dwgan/EasyMotor/releases/download/v1.2.3/EasyMotor_v1.2.3_win-x64.exe"
-        latest_url = "https://api.github.com/repos/dwgan/EasyMotor/releases/latest"
+        manifest_url = "https://github.com/dwgan/EasyMotorApp/releases/download/v1.2.3/easymotor-update.json"
+        executable_url = "https://github.com/dwgan/EasyMotorApp/releases/download/v1.2.3/EasyMotor_v1.2.3_win-x64.exe"
+        latest_url = "https://api.github.com/repos/dwgan/EasyMotorApp/releases/latest"
         release = {
             "tag_name": "v1.2.3",
             "draft": False,
             "prerelease": False,
-            "html_url": "https://github.com/dwgan/EasyMotor/releases/tag/v1.2.3",
+            "html_url": "https://github.com/dwgan/EasyMotorApp/releases/tag/v1.2.3",
             "body": "Safe release",
             "assets": [
                 {
