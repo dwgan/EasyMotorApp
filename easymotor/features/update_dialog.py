@@ -12,6 +12,7 @@ from typing import Callable
 
 from easymotor.branding import apply_window_icon
 from easymotor.i18n import tr
+from easymotor.features.markdown_view import render_markdown
 from easymotor.updates import GitHubReleaseClient, UpdateCancelled, UpdateRelease
 from easymotor.updates.installer import update_root
 from easymotor.updates.pe import validate_easymotor_executable
@@ -124,10 +125,7 @@ class UpdateDialog(tk.Toplevel):
         self.primary_button.configure(text=tr(self.language, "check_again"), state=tk.NORMAL)
 
     def _set_notes(self, text: str) -> None:
-        self.notes.configure(state=tk.NORMAL)
-        self.notes.delete("1.0", tk.END)
-        self.notes.insert("1.0", text)
-        self.notes.configure(state=tk.DISABLED)
+        render_markdown(self.notes, text)
 
     def _primary_action(self) -> None:
         if self.release is None or not self.release.is_newer_than(self.current_version):

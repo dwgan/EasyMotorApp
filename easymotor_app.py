@@ -88,7 +88,11 @@ from easymotor.theme import (
 )
 from easymotor.transports import USB_CAN_BAUD, UsbCanMotorTransport
 from easymotor.updates import UpdateRelease, launch_update_helper
-from easymotor.updates.installer import acknowledge_healthy_start, health_marker_from_argv
+from easymotor.updates.installer import (
+    acknowledge_healthy_start,
+    apply_update_from_argv,
+    health_marker_from_argv,
+)
 from easymotor.version import __version__, window_title
 
 
@@ -3218,7 +3222,6 @@ class EasyMotorApp(tk.Tk):
         )
 
     def _install_downloaded_update(self, path: Path, release: UpdateRelease) -> None:
-        del release
         language = self.language_var.get()
         if self.connected or self._motor_activity_active():
             messagebox.showwarning(
@@ -3232,7 +3235,11 @@ class EasyMotorApp(tk.Tk):
         ):
             return
         try:
-            launch_update_helper(path, Path(sys.executable))
+            launch_update_helper(
+                path,
+                Path(sys.executable),
+                release.manifest.asset_name,
+            )
         except Exception as exc:
             messagebox.showerror(
                 tr(language, "update_install_title"),
@@ -3268,10 +3275,13 @@ class EasyMotorApp(tk.Tk):
             except Exception:
                 pass
         self.disconnect()
+        self.quit()
         self.destroy()
 
 
 if __name__ == "__main__":
+    if apply_update_from_argv():
+        raise SystemExit(0)
     health_marker = health_marker_from_argv()
     app = EasyMotorApp()
     if health_marker is not None:
