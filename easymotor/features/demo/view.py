@@ -83,36 +83,25 @@ class DemoView(ttk.Frame):
 
         connection = ttk.LabelFrame(self, text=tr(language, "connection"), padding=14)
         connection.pack(fill=tk.X, pady=(22, 0))
-        ttk.Label(connection, text=tr(language, "interface")).grid(row=0, column=0, padx=(0, 8))
-        self.can_button = ttk.Radiobutton(
-            connection,
-            text=tr(language, "can"),
-            variable=self.interface_var,
-            value="can",
-            command=self._on_interface_changed,
+        self.interface_var.set("can")
+        ttk.Label(connection, text=f'{tr(language, "interface")}: {tr(language, "can")}').grid(
+            row=0, column=0, padx=(0, 18), sticky="w"
         )
-        self.can_button.grid(row=0, column=1, padx=(0, 12), sticky="w")
-        self.rs485_button = ttk.Radiobutton(
-            connection,
-            text=tr(language, "rs485"),
-            variable=self.interface_var,
-            value="rs485",
-            command=self._on_interface_changed,
-        )
-        self.rs485_button.grid(row=0, column=2, padx=(0, 18), sticky="w")
-        ttk.Label(connection, text=tr(language, "port")).grid(row=0, column=3, padx=(0, 8))
+        ttk.Label(connection, text=tr(language, "port")).grid(row=0, column=1, padx=(0, 8))
         self.port_combo = ttk.Combobox(
             connection, textvariable=self.port_var, width=14, state="readonly", values=self._ports
         )
-        self.port_combo.grid(row=0, column=4, padx=(0, 8))
+        self.port_combo.grid(row=0, column=2, padx=(0, 8))
         self.refresh_button = ttk.Button(connection, text=tr(language, "refresh"), command=self._on_refresh)
-        self.refresh_button.grid(row=0, column=5, padx=(0, 12))
+        self.refresh_button.grid(row=0, column=3, padx=(0, 12))
         self.connect_button = ttk.Button(
             connection, text=tr(language, "connect"), command=self._on_toggle_connection
         )
-        self.connect_button.grid(row=0, column=6, padx=(0, 14))
-        ttk.Label(connection, textvariable=self.connection_var).grid(row=1, column=0, columnspan=7, pady=(10, 0), sticky="w")
-        connection.columnconfigure(6, weight=1)
+        self.connect_button.grid(row=0, column=4, padx=(0, 14))
+        ttk.Label(connection, textvariable=self.connection_var).grid(
+            row=1, column=0, columnspan=5, pady=(10, 0), sticky="w"
+        )
+        connection.columnconfigure(4, weight=1)
 
         status = ttk.LabelFrame(self, text=tr(language, "motor_status"), padding=18)
         status.pack(fill=tk.X, pady=(18, 0))
@@ -190,8 +179,6 @@ class DemoView(ttk.Frame):
         settings_state = tk.NORMAL if settings_enabled and not connected else tk.DISABLED
         self.refresh_button.configure(state=settings_state)
         self.port_combo.configure(state="readonly" if settings_state == tk.NORMAL else tk.DISABLED)
-        self.can_button.configure(state=settings_state)
-        self.rs485_button.configure(state=settings_state)
         self.status_var.set(status_text)
         run_state = tk.NORMAL if run_enabled else tk.DISABLED
         self.forward_button.configure(state=run_state)

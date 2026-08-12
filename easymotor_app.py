@@ -100,7 +100,8 @@ messagebox = LocalizedMessageBox(tk_messagebox)
 
 
 BAUD_RATE = 2_500_000
-CAN_ENUMERATION_TIMEOUT_MS = 1_000
+CAN_ENUMERATION_RETRY_MS = 1_000
+CAN_ENUMERATION_GUIDANCE_MS = 10_000
 KEEPALIVE_INTERVAL_MS = 250
 START_TIMEOUT_MS = 30_000
 MAX_IQ_LSB = 100
@@ -301,13 +302,9 @@ WAVE_GLITCH_LSB = 60
 CAN_READY_RE = re.compile(r"CAN_NODE READY")
 CAN_NODE_ID_RE = re.compile(r"CAN_NODE_ID=(\d+)")
 CAN_MASTER_ID_RE = re.compile(r"CAN_MASTER_ID=(\d+)")
-CAN_STBY_NORMAL_RE = re.compile(r"CMD can stby 0: transceiver normal mode")
-CAN_STBY_STANDBY_RE = re.compile(r"CMD can stby 1: transceiver standby")
 CAN_STATUS_HEAD_RE = re.compile(r"CAN_NODE STATUS")
 CAN_STATUS_ID_RE = re.compile(r"^  (node_id|master_id)=0x(\d+)$")
 CAN_STATUS_FIELD_RE = re.compile(r"^  (\w+)=(\d+)$")
-CAN_LOOP_PASS_RE = re.compile(r"CAN_LOOP PASS")
-CAN_LOOP_FAIL_RE = re.compile(r"CAN_LOOP FAIL")
 CAN_CODEC_PASS_RE = re.compile(r"CAN_CODEC PASS")
 CAN_CODEC_FAIL_RE = re.compile(r"CAN_CODEC FAIL")
 
@@ -345,7 +342,9 @@ class EasyMotorApp(tk.Tk):
         self.can_last_feedback_time = 0.0
         self.can_last_feedback_log_time = 0.0
         self.can_command_rpm = 0
-        self.can_enumeration_deadline = 0.0
+        self.can_enumeration_started = 0.0
+        self.can_enumeration_generation = 0
+        self.can_enumeration_guidance_shown = False
         self.can_stop_not_before = 0.0
         self.mci_state: int | None = None
         self.start_waiting = False
@@ -540,7 +539,6 @@ class EasyMotorApp(tk.Tk):
         self.engineer_can_tab = ttk.Frame(self.engineer_notebook)
         self.engineer_log_tab = ttk.Frame(self.engineer_notebook)
         self._engineer_tab_titles = (
-            (self.engineer_control_tab, "安全控制", "Control"),
             (self.engineer_monitor_tab, "状态与遥测", "Monitor"),
             (self.engineer_can_tab, "CAN 调试", "CAN"),
             (self.engineer_log_tab, "收发日志", "Logs"),
@@ -612,34 +610,14 @@ class EasyMotorApp(tk.Tk):
             command=lambda: self.send_command("can status"),
         ).grid(row=0, column=0, padx=(0, 4))
         ttk.Button(
-            can_tools, text="正常模式",
-            command=lambda: self.send_command("can stby 0"),
-        ).grid(row=0, column=1, padx=4)
-        ttk.Button(
-            can_tools, text="待机",
-            command=lambda: self.send_command("can stby 1"),
-        ).grid(row=0, column=2, padx=4)
-        ttk.Button(
-            can_tools, text="自回环",
-            command=lambda: self.send_command("can loop"),
-        ).grid(row=0, column=3, padx=4)
-        ttk.Button(
             can_tools, text="编解码自检",
             command=lambda: self.send_command("can codec"),
-        ).grid(row=0, column=4, padx=4)
-        ttk.Button(
-            can_tools, text="上报开",
-            command=lambda: self.send_command("can report on"),
-        ).grid(row=0, column=5, padx=4)
-        ttk.Button(
-            can_tools, text="上报关",
-            command=lambda: self.send_command("can report off"),
-        ).grid(row=0, column=6, padx=4)
+        ).grid(row=0, column=1, padx=4)
         ttk.Button(
             can_tools, text="USB-CAN 参数验收",
             command=self.open_can_tool_window,
-        ).grid(row=0, column=7, padx=(12, 4))
-        can_tools.columnconfigure(8, weight=1)
+        ).grid(row=0, column=2, padx=(12, 4))
+        can_tools.columnconfigure(3, weight=1)
         ttk.Label(can_frame, textvariable=self.can_status_var).pack(
             fill=tk.X, pady=(6, 0)
         )
@@ -1058,7 +1036,12 @@ class EasyMotorApp(tk.Tk):
             mode = tr(language, "continuous_word" if plan.continuous else "timed_word")
             text = tr(language, "running", direction=direction, rpm=plan.speed_rpm, mode=mode)
         elif self.active_interface == "can" and self.can_uid is None:
-            text = tr(language, "reading")
+            text = tr(
+                language,
+                "can_waiting_help"
+                if self.can_enumeration_guidance_shown
+                else "can_waiting_power",
+            )
         elif self.mci_state == 0:
             text = tr(language, "ready")
         elif self.mci_state == 6:
@@ -1151,10 +1134,10 @@ class EasyMotorApp(tk.Tk):
             self.connect()
 
     def _connection_interface(self) -> str:
-        """Keep the demo selection independent from the RS485-only engineer page."""
+        """Use CAN for all customer motion and RS485 only for diagnostics."""
         if self.app_mode == "engineer":
             return "rs485"
-        return self.interface_var.get()
+        return "can"
 
     def connect(self) -> None:
         port = self.port_var.get()
@@ -1209,7 +1192,6 @@ class EasyMotorApp(tk.Tk):
         transport = UsbCanMotorTransport(self.rx_queue)
         try:
             transport.connect(port)
-            transport.set_active_report(True)
             transport.enumerate()
         except (serial.SerialException, OSError, RuntimeError) as exc:
             transport.close()
@@ -1222,24 +1204,54 @@ class EasyMotorApp(tk.Tk):
         self.can_uid = None
         self.can_last_feedback_time = 0.0
         self.can_command_rpm = 0
-        self.can_enumeration_deadline = time.monotonic() + CAN_ENUMERATION_TIMEOUT_MS / 1000.0
+        self.can_enumeration_started = time.monotonic()
+        self.can_enumeration_generation += 1
+        generation = self.can_enumeration_generation
+        self.can_enumeration_guidance_shown = False
         self.connection_var.set(f"{port} | CAN 1 Mbps / USB {USB_CAN_BAUD:,}")
         self._append_log("event", f"EasyMotor CAN connected {port} @ {USB_CAN_BAUD}\n")
+        self._append_log(
+            "event",
+            "Waiting for CAN motor power; device discovery will retry automatically.\n",
+        )
         self._update_control_state()
-        self.after(CAN_ENUMERATION_TIMEOUT_MS, self._check_can_enumeration)
+        self.after(
+            CAN_ENUMERATION_RETRY_MS,
+            lambda: self._retry_can_enumeration(generation),
+        )
 
-    def _check_can_enumeration(self) -> None:
+    def _retry_can_enumeration(self, generation: int) -> None:
+        """Keep the adapter connected and discover a motor powered later."""
         if (
-            self.connected
-            and self.active_interface == "can"
-            and self.can_uid is None
-            and time.monotonic() >= self.can_enumeration_deadline
+            generation != self.can_enumeration_generation
+            or not self.connected
+            or self.active_interface != "can"
+            or self.can_uid is not None
         ):
-            messagebox.showwarning(
-                tr(self.language_var.get(), "connection_failed"),
-                tr(self.language_var.get(), "can_standby_hint"),
-                parent=self,
+            return
+        transport = self.can_transport
+        if transport is None:
+            return
+        try:
+            transport.enumerate()
+        except (serial.SerialException, OSError, RuntimeError) as exc:
+            self._append_log("error", f"USB-CAN enumeration retry failed: {exc}\n")
+            self.disconnect()
+            return
+        if (
+            not self.can_enumeration_guidance_shown
+            and time.monotonic() - self.can_enumeration_started
+            >= CAN_ENUMERATION_GUIDANCE_MS / 1000.0
+        ):
+            self.can_enumeration_guidance_shown = True
+            self._append_log(
+                "event", tr(self.language_var.get(), "can_standby_hint") + "\n"
             )
+        self._render_demo_view()
+        self.after(
+            CAN_ENUMERATION_RETRY_MS,
+            lambda: self._retry_can_enumeration(generation),
+        )
 
     def disconnect(self) -> None:
         activity_before_disconnect = self._motor_activity_active()
@@ -1269,6 +1281,8 @@ class EasyMotorApp(tk.Tk):
                 pass
             can_transport.close()
         self.connected = False
+        self.can_enumeration_generation += 1
+        self.can_enumeration_guidance_shown = False
         self.active_interface = None
         self.start_waiting = False
         self.nonzero_iq_active = False
@@ -1441,8 +1455,18 @@ class EasyMotorApp(tk.Tk):
         if device is not None:
             self._append_log("rx", f"CAN RX {format_frame(frame)}\n")
             node_id, uid = device
+            first_detection = self.can_uid is None
             self.can_uid = uid
-            self._append_log("event", f"CAN node {node_id} UID=0x{uid:016X}\n")
+            if first_detection:
+                self.can_enumeration_generation += 1
+                self._append_log("event", f"CAN node {node_id} UID=0x{uid:016X}\n")
+                transport = self.can_transport
+                if transport is not None:
+                    try:
+                        transport.set_active_report(True)
+                    except (serial.SerialException, OSError, RuntimeError) as exc:
+                        self._append_log("error", f"USB-CAN report setup failed: {exc}\n")
+            self._update_control_state()
             return
         feedback = parse_feedback(frame)
         if feedback is not None:
@@ -1561,12 +1585,6 @@ class EasyMotorApp(tk.Tk):
         if master_id_match:
             self.can_master_id = int(master_id_match.group(1))
             self._update_can_label()
-        if CAN_STBY_NORMAL_RE.search(line):
-            self.can_normal = True
-            self._update_can_label()
-        if CAN_STBY_STANDBY_RE.search(line):
-            self.can_normal = False
-            self._update_can_label()
         id_field = CAN_STATUS_ID_RE.match(line)
         if id_field:
             if id_field.group(1) == "node_id":
@@ -1597,10 +1615,6 @@ class EasyMotorApp(tk.Tk):
             elif key == "active_report":
                 self.can_active_report = value != 0
             self._update_can_label()
-        if CAN_LOOP_PASS_RE.search(line):
-            self._append_log("event", "CAN 自回环通过\n")
-        elif CAN_LOOP_FAIL_RE.search(line):
-            self._append_log("error", "CAN 自回环失败\n")
         if CAN_CODEC_PASS_RE.search(line):
             self._append_log("event", "CAN 编解码自检通过\n")
         elif CAN_CODEC_FAIL_RE.search(line):
@@ -1869,6 +1883,18 @@ class EasyMotorApp(tk.Tk):
             if not quiet:
                 self._append_log(
                     "error", f"RS485 command '{command}' is unavailable on the CAN demo connection.\n"
+                )
+            return False
+        normalized = command.strip().lower()
+        diagnostic_command = (
+            normalized in {"status", "help", "can status", "can codec"}
+            or normalized.startswith("wave ")
+        )
+        if not diagnostic_command:
+            if not quiet:
+                self._append_log(
+                    "error",
+                    f"RS485 debug is read-only; command '{command}' was blocked. Use CAN for motor control.\n",
                 )
             return False
         if not self.connected or self.serial_port is None:
