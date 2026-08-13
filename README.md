@@ -119,14 +119,19 @@ CAN 帧、RS485 串口遥测和软件生命周期事件不再混在单一列表�
 
 ## UART5 Engineering Debug 命令面
 
-串口：UART5，`2500000` baud，8N1，RS485 半双工（PB3 硬件 DE）。
+串口：UART5，Engineering Debug 固件默认 `4000000` baud，8N1，RS485 半双工
+（PB3 硬件 DE）。上位机提供 921600/1M/2M/2.5M/3M/4M 常用选项，也可输入
+自定义整数波特率；所选值必须与固件一致，且 USB-RS485 适配器必须支持该速率。
 命令为小写 ASCII，CR/LF 结尾；MCU 也接受 UART IDLE 作为命令结束符。
 
 | 命令 | 范围/说明 |
 |---|---|
 | `status` | 打印 TORQUE_CMD / SPEED / MOTION / UART_RX 诊断 |
 | `help` | 打印命令帮助 |
-| `wave ...` | 启停 ADC 原始值或统计波形输出 |
+| `wave on [1..100]` | 三相电流原始分频流 |
+| `wave stats on [10..500]` | 三相电流最小/最大包络流 |
+| `wave single on [u/v/w]` | 指定一路相电流按每次 FOC 采样分块发送 |
+| `wave off` | 停止波形流 |
 | `can status` | 打印 CAN 传输状态和 Bus-Off 恢复统计 |
 | `can codec` | 执行不访问真实总线的协议编解码自检 |
 
@@ -147,7 +152,7 @@ Keepalive、CAN STBY 和主动上报控制命令；真实运动和状态改变�
 2. 等待节点枚举成功；此时 CAN 已上线，但电机仍保持停止。
 3. 选择 5/10/20 motor rpm，点击正转或反转；默认 5 秒后自动发送 Type 4 停止。
 4. 只有明确勾选“一直转”才持续刷新 Type 1，点击停止、断线、故障或 MCU 看门狗都会结束。
-5. 需要波形时保持 CAN 在线并进入高级模式，在“RS485 Debug”页选择另一 COM 口；连接后打开波形窗口，再切换到“CAN Control”页使用同样受限的 5/10/20 rpm 控制。波形独立窗口会继续显示。UART5 遥测必须使用 Engineering Debug 固件。
+5. 需要波形时保持 CAN 在线并进入高级模式，在“RS485 Debug”页选择另一 COM 口和与固件一致的波特率；连接后打开波形窗口，再切换到“CAN Control”页使用同样受限的 5/10/20 rpm 控制。波形独立窗口会继续显示。UART5 遥测必须使用 Engineering Debug 固件。普通模式观察三相波形，包络模式保留每个统计窗口的三相峰值；“单路全采样”使用 128 点二进制分块，在当前 50 kHz FOC 配置下连续传输选定 U/V/W 一路的全部控制周期采样。横轴时间窗可选择 30 ms、200 ms、1 s、2 s 或 5 s；长时间窗按屏幕像素保留每列 min/max 后绘制，因此扩大周期范围不会隐藏窄尖峰，CSV 仍保存完整接收样本。
 
 ## RS04 USB-CAN 参数验收
 

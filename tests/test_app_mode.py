@@ -65,6 +65,41 @@ class AppModeInterfaceTests(unittest.TestCase):
         self.assertIn("transport.send(frame)", source)
         self.assertNotIn("CanToolWindow", source)
 
+    def test_can_discovery_disables_unsolicited_active_reports(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+        device_start = source.index("device = parse_device_id_response(frame)")
+        feedback_start = source.index("feedback = parse_feedback(frame)", device_start)
+        discovery_source = source[device_start:feedback_start]
+
+        self.assertIn("transport.set_active_report(False)", discovery_source)
+        self.assertNotIn("transport.set_active_report(True)", discovery_source)
+
+    def test_active_reports_are_limited_to_enable_and_alignment(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+        start_begin = source.index("    def start_motor(")
+        start_end = source.index("    def _poll_start_sequence(", start_begin)
+        start_source = source[start_begin:start_end]
+        motor_begin = source.index("elif feedback.mode == MODE_MOTOR:")
+        motor_end = source.index("            else:", motor_begin)
+        motor_source = source[motor_begin:motor_end]
+
+        self.assertLess(
+            start_source.index("set_active_report(True)"),
+            start_source.index("self.can_transport.enable()"),
+        )
+        self.assertIn("set_active_report(False)", motor_source)
+
+    def test_reset_report_does_not_disable_alignment_reporting(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+        reset_begin = source.index("if feedback.mode == MODE_RESET:")
+        calibrating_begin = source.index(
+            "elif feedback.mode == MODE_CALIBRATING:", reset_begin
+        )
+        reset_source = source[reset_begin:calibrating_begin]
+
+        self.assertIn("not self.start_waiting", reset_source)
+        self.assertIn("set_active_report(False)", reset_source)
+
     def test_logs_are_split_by_source(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
 
@@ -204,8 +239,8 @@ class AppModeInterfaceTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, source)
 
-        self.assertIn("def _can_command_refresh_tick(self)", source)
-        self.assertIn("self.can_transport.command_velocity(self.can_command_rpm)", source)
+        self.assertNotIn("def _can_command_refresh_tick(self)", source)
+        self.assertIn("self.can_command_refresher.start", source)
 
     def test_can_discovery_retries_while_motor_is_unpowered(self):
         app = object.__new__(EasyMotorApp)

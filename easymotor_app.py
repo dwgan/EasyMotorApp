@@ -16,6 +16,7 @@ import time
 import tkinter as tk
 from collections import deque
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 from tkinter import messagebox as tk_messagebox, ttk
 import os
@@ -53,6 +54,7 @@ from easymotor.protocols.can_motor import (
     parse_feedback,
 )
 from easymotor.services.demo_service import DemoAction, DemoError, DemoPhase, DemoService
+from easymotor.services.can_command_refresher import CanCommandRefresher
 from easymotor.theme import (
     LOG_BACKGROUND,
     LOG_ERROR,
@@ -83,7 +85,15 @@ from easymotor.version import __version__, window_title
 messagebox = LocalizedMessageBox(tk_messagebox)
 
 
-BAUD_RATE = 2_500_000
+DEFAULT_DEBUG_BAUD = 4_000_000
+DEBUG_BAUD_PRESETS = (
+    "921600",
+    "1000000",
+    "2000000",
+    "2500000",
+    "3000000",
+    "4000000",
+)
 CAN_ENUMERATION_RETRY_MS = 1_000
 CAN_ENUMERATION_GUIDANCE_MS = 10_000
 COMMAND_REFRESH_INTERVAL_MS = 250
@@ -249,9 +259,90 @@ WAVE_SOF = 0xA5
 WAVE_FRAME_LEN = 10
 WAVE_STATS_SOF = 0xA6
 WAVE_STATS_FRAME_LEN = 16
+WAVE_SINGLE_SOF = 0xA7
+WAVE_SINGLE_BLOCK_SAMPLES = 128
 WAVE_END_SEQ = 0xFFFF
-WAVE_BUFFER_MAX = 1500
+WAVE_BUFFER_MAX = 250_000
 WAVE_GLITCH_LSB = 60
+WAVE_TIME_WINDOWS = ("30 ms", "200 ms", "1 s", "2 s", "5 s")
+WAVE_REDRAW_INTERVAL_MS = 100
+WAVE_DISPLAY_ENVELOPE_HZ = 1_000
+RX_QUEUE_INTERVAL_MS = 20
+RX_QUEUE_BUSY_INTERVAL_MS = 1
+RX_QUEUE_BUDGET_MS = 6.0
+RX_QUEUE_MAX_ITEMS = 64
+
+
+def parse_debug_baud(text: str) -> int:
+    """Parse an editable baud-rate field while enforcing a practical range."""
+    try:
+        baud_rate = int(text.strip().replace(",", "").replace("_", ""))
+    except ValueError as exc:
+        raise ValueError("debug baud rate must be an integer") from exc
+    if not 9_600 <= baud_rate <= 12_000_000:
+        raise ValueError("debug baud rate must be between 9600 and 12000000")
+    return baud_rate
+
+
+def parse_wave_time_window(text: str) -> float:
+    value, unit = text.strip().split(maxsplit=1)
+    seconds = float(value)
+    if unit == "ms":
+        seconds /= 1000.0
+    elif unit != "s":
+        raise ValueError("unsupported waveform time unit")
+    if seconds <= 0.0:
+        raise ValueError("waveform time window must be positive")
+    return seconds
+
+
+def compress_wave_points(
+    points: list[tuple[int, int]], max_columns: int
+) -> list[tuple[int, int]]:
+    """Preserve per-column extrema while bounding the number of canvas points."""
+    if max_columns <= 0 or len(points) <= max_columns * 2:
+        return points
+    result: list[tuple[int, int]] = []
+    for column in range(max_columns):
+        start = column * len(points) // max_columns
+        end = (column + 1) * len(points) // max_columns
+        bucket = points[start:end]
+        if not bucket:
+            continue
+        low_index = 0
+        high_index = 0
+        for index in range(1, len(bucket)):
+            if bucket[index][1] < bucket[low_index][1]:
+                low_index = index
+            if bucket[index][1] > bucket[high_index][1]:
+                high_index = index
+        for index in sorted({low_index, high_index}):
+            result.append(bucket[index])
+    return result
+
+
+def compress_envelope_entries(
+    entries: list[tuple[int, int, int]], max_columns: int
+) -> list[tuple[int, int, int]]:
+    """Merge time-ordered min/max entries into at most one item per pixel."""
+    if max_columns <= 0 or len(entries) <= max_columns:
+        return entries
+    result: list[tuple[int, int, int]] = []
+    for column in range(max_columns):
+        start = column * len(entries) // max_columns
+        end = (column + 1) * len(entries) // max_columns
+        if start >= end:
+            continue
+        bucket = entries[start:end]
+        result.append(
+            (
+                bucket[0][0],
+                min(item[1] for item in bucket),
+                max(item[2] for item in bucket),
+            )
+        )
+    return result
+
 
 def format_torque_error(error_code: int) -> str:
     """Decode the TORQUE_CMD error bitmask into readable labels."""
@@ -272,6 +363,10 @@ class EasyMotorApp(tk.Tk):
         self.serial_port: serial.Serial | None = None
         self.serial_lock = threading.Lock()
         self.rx_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.can_command_refresher = CanCommandRefresher(
+            self.rx_queue,
+            interval_s=COMMAND_REFRESH_INTERVAL_MS / 1000.0,
+        )
         self.reader_stop = threading.Event()
         self.reader_thread: threading.Thread | None = None
         self.last_rx_time = 0.0
@@ -285,6 +380,7 @@ class EasyMotorApp(tk.Tk):
         self.can_uid: int | None = None
         self.can_last_feedback_time = 0.0
         self.can_last_feedback_log_time = 0.0
+        self.can_active_report_enabled = False
         self.can_command_rpm = 0
         self.can_enumeration_started = 0.0
         self.can_enumeration_generation = 0
@@ -307,6 +403,7 @@ class EasyMotorApp(tk.Tk):
 
         self.port_var = tk.StringVar()
         self.debug_port_var = tk.StringVar()
+        self.debug_baud_var = tk.StringVar(value=str(DEFAULT_DEBUG_BAUD))
         localized_var = lambda value="": LocalizedStringVar(self, self.language_var.get, value)
         self.connection_var = localized_var(tr(DEFAULT_LANGUAGE, "not_connected"))
         self.debug_connection_var = localized_var(tr(DEFAULT_LANGUAGE, "not_connected"))
@@ -338,6 +435,10 @@ class EasyMotorApp(tk.Tk):
         self.wave_v_var = tk.BooleanVar(value=True)
         self.wave_w_var = tk.BooleanVar(value=True)
         self.wave_stats_var = tk.BooleanVar(value=False)
+        self.wave_single_var = tk.BooleanVar(value=False)
+        self.wave_single_channel_var = tk.StringVar(value="U")
+        self.wave_time_window_var = tk.StringVar(value="1 s")
+        self._wave_sample_rate_hz = 5_000.0
         self.wave_scale_var = localized_var("自动")
         self.wave_status_var = localized_var("波形: 停止")
         self._wave_buffers: dict[str, deque] = {
@@ -346,7 +447,19 @@ class EasyMotorApp(tk.Tk):
             "w": deque(maxlen=WAVE_BUFFER_MAX),
         }
         self._wave_stats_entries: deque = deque(maxlen=WAVE_BUFFER_MAX)
+        self._wave_display_entries: dict[str, deque] = {
+            "u": deque(maxlen=5 * WAVE_DISPLAY_ENVELOPE_HZ),
+            "v": deque(maxlen=5 * WAVE_DISPLAY_ENVELOPE_HZ),
+            "w": deque(maxlen=5 * WAVE_DISPLAY_ENVELOPE_HZ),
+        }
+        self._wave_display_accumulators: dict[str, list[int] | None] = {
+            "u": None,
+            "v": None,
+            "w": None,
+        }
+        self._wave_display_bucket_samples = 5
         self._wave_last_seq: int | None = None
+        self._wave_single_last_dropped: int | None = None
         self._wave_frame_count = 0
         self._wave_lost_count = 0
         self._wave_glitch_count = 0
@@ -370,8 +483,7 @@ class EasyMotorApp(tk.Tk):
         self._build_ui()
         self.refresh_ports()
         self.after(20, self._process_rx_queue)
-        self.after(COMMAND_REFRESH_INTERVAL_MS, self._can_command_refresh_tick)
-        self.after(50, self._wave_redraw)
+        self.after(WAVE_REDRAW_INTERVAL_MS, self._wave_redraw)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -515,17 +627,28 @@ class EasyMotorApp(tk.Tk):
         ttk.Button(debug_connection, text="刷新", command=self.refresh_ports).grid(
             row=0, column=2, padx=(0, 12)
         )
-        ttk.Label(debug_connection, text=f"{BAUD_RATE:,} baud / 8N1 / RS485").grid(
-            row=0, column=3, padx=(0, 12)
+        ttk.Label(debug_connection, text="波特率").grid(
+            row=0, column=3, padx=(0, 4)
+        )
+        self.debug_baud_combo = ttk.Combobox(
+            debug_connection,
+            textvariable=self.debug_baud_var,
+            values=DEBUG_BAUD_PRESETS,
+            width=11,
+            state="normal",
+        )
+        self.debug_baud_combo.grid(row=0, column=4, padx=(0, 4))
+        ttk.Label(debug_connection, text="baud / 8N1 / RS485").grid(
+            row=0, column=5, padx=(0, 12)
         )
         self.connect_button = ttk.Button(
             debug_connection, text="连接", command=self.toggle_debug_connection
         )
-        self.connect_button.grid(row=0, column=4)
+        self.connect_button.grid(row=0, column=6)
         ttk.Label(debug_connection, textvariable=self.debug_connection_var).grid(
-            row=0, column=5, padx=(12, 0), sticky="w"
+            row=0, column=7, padx=(12, 0), sticky="w"
         )
-        debug_connection.columnconfigure(6, weight=1)
+        debug_connection.columnconfigure(8, weight=1)
 
         state_frame = ttk.LabelFrame(
             self.engineer_rs485_tab,
@@ -1054,9 +1177,19 @@ class EasyMotorApp(tk.Tk):
             )
             return
         try:
+            baud_rate = parse_debug_baud(self.debug_baud_var.get())
+        except ValueError:
+            messagebox.showerror(
+                "无效波特率",
+                "请输入 9600 到 12000000 之间的整数波特率。",
+                parent=self,
+            )
+            return
+        self.debug_baud_var.set(str(baud_rate))
+        try:
             connection = serial.Serial(
                 port=port,
-                baudrate=BAUD_RATE,
+                baudrate=baud_rate,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
@@ -1081,9 +1214,10 @@ class EasyMotorApp(tk.Tk):
             target=self._reader_loop, name="robot-joint-uart", daemon=True
         )
         self.reader_thread.start()
-        self.debug_connection_var.set(f"{port} | RS485 Debug @ {BAUD_RATE:,}")
+        self.debug_baud_combo.configure(state="disabled")
+        self.debug_connection_var.set(f"{port} | RS485 Debug @ {baud_rate:,}")
         self.connect_button.configure(text=tr(self.language_var.get(), "disconnect"))
-        self._append_log("event", f"RS485 Debug connected {port} @ {BAUD_RATE}\n")
+        self._append_log("event", f"RS485 Debug connected {port} @ {baud_rate}\n")
         self._update_control_state()
         self.after(100, lambda: self.send_command("status"))
 
@@ -1102,6 +1236,7 @@ class EasyMotorApp(tk.Tk):
         self.mci_state = None
         self.can_uid = None
         self.can_last_feedback_time = 0.0
+        self.can_active_report_enabled = False
         self.can_feedback_var.set("CAN Type 2 反馈：等待设备枚举")
         self.can_command_rpm = 0
         self.can_enumeration_started = time.monotonic()
@@ -1155,6 +1290,7 @@ class EasyMotorApp(tk.Tk):
 
     def _disconnect_can(self) -> None:
         activity_before_disconnect = self._motor_activity_active()
+        self.can_command_refresher.stop()
         if hasattr(self, "can_parameter_panel"):
             self.can_parameter_panel.on_disconnect()
         self.demo_service.cancel()
@@ -1172,6 +1308,7 @@ class EasyMotorApp(tk.Tk):
         self.connected = False
         self.can_enumeration_generation += 1
         self.can_enumeration_guidance_shown = False
+        self.can_active_report_enabled = False
         self.active_interface = None
         self.start_waiting = False
         self.motion_command_active = False
@@ -1221,10 +1358,12 @@ class EasyMotorApp(tk.Tk):
         for buf in self._wave_buffers.values():
             buf.clear()
         self._wave_stats_entries.clear()
+        self._reset_wave_display_envelopes()
         self.wave_status_var.set("波形: 停止")
         self.rs485_state_var.set("RS485 MCI：调试端口未连接")
         self.torque_var.set("TORQUE: 未知")
         self.debug_connection_var.set(tr(self.language_var.get(), "not_connected"))
+        self.debug_baud_combo.configure(state="normal")
         self.connect_button.configure(text=tr(self.language_var.get(), "connect"))
         self._update_control_state()
         self._append_log("event", "RS485 Debug disconnected\n")
@@ -1272,11 +1411,14 @@ class EasyMotorApp(tk.Tk):
                 self.rx_queue.put(("line", line.decode("ascii", errors="replace")))
 
     def _extract_wave_frames(self, pending: bytearray) -> None:
-        """Parse raw (0xA5) and envelope (0xA6) frames; salvage text lines."""
+        """Parse raw, envelope, and single-channel block frames."""
         while True:
             raw_start = pending.find(bytes([WAVE_SOF]))
             stats_start = pending.find(bytes([WAVE_STATS_SOF]))
-            candidates = [pos for pos in (raw_start, stats_start) if pos >= 0]
+            single_start = pending.find(bytes([WAVE_SINGLE_SOF]))
+            candidates = [
+                pos for pos in (raw_start, stats_start, single_start) if pos >= 0
+            ]
             if not candidates:
                 last_newline = pending.rfind(b"\n")
                 if last_newline >= 0:
@@ -1287,8 +1429,22 @@ class EasyMotorApp(tk.Tk):
             if start > 0:
                 self._emit_text_lines(bytes(pending[:start]))
                 del pending[:start]
-            is_stats = pending[0] == WAVE_STATS_SOF
-            length = WAVE_STATS_FRAME_LEN if is_stats else WAVE_FRAME_LEN
+            frame_type = pending[0]
+            if frame_type == WAVE_SINGLE_SOF:
+                if len(pending) < 5:
+                    return
+                sample_count = pending[4]
+                if not 1 <= sample_count <= WAVE_SINGLE_BLOCK_SAMPLES:
+                    del pending[0]
+                    continue
+                length = 8 + sample_count * 2
+            else:
+                sample_count = 0
+                length = (
+                    WAVE_STATS_FRAME_LEN
+                    if frame_type == WAVE_STATS_SOF
+                    else WAVE_FRAME_LEN
+                )
             if len(pending) < length:
                 return
             frame = bytes(pending[:length])
@@ -1299,7 +1455,7 @@ class EasyMotorApp(tk.Tk):
             if checksum != frame[length - 1]:
                 continue
             seq = frame[1] | (frame[2] << 8)
-            if is_stats:
+            if frame_type == WAVE_STATS_SOF:
                 values = tuple(
                     int.from_bytes(
                         frame[3 + 2 * index : 5 + 2 * index],
@@ -1309,6 +1465,22 @@ class EasyMotorApp(tk.Tk):
                     for index in range(6)
                 )
                 self.rx_queue.put(("wave_stats", (seq, values)))
+            elif frame_type == WAVE_SINGLE_SOF:
+                channel = frame[3]
+                if channel > 2:
+                    continue
+                dropped = int.from_bytes(frame[5:7], "little")
+                samples = tuple(
+                    int.from_bytes(
+                        frame[7 + 2 * index : 9 + 2 * index],
+                        "little",
+                        signed=True,
+                    )
+                    for index in range(sample_count)
+                )
+                self.rx_queue.put(
+                    ("wave_single", (seq, channel, dropped, samples))
+                )
             else:
                 iu = int.from_bytes(frame[3:5], "little", signed=True)
                 iv = int.from_bytes(frame[5:7], "little", signed=True)
@@ -1316,9 +1488,15 @@ class EasyMotorApp(tk.Tk):
                 self.rx_queue.put(("wave", (seq, iu, iv, iw)))
 
     def _process_rx_queue(self) -> None:
+        deadline = time.perf_counter() + RX_QUEUE_BUDGET_MS / 1000.0
+        processed = 0
         try:
-            while True:
+            while (
+                processed < RX_QUEUE_MAX_ITEMS
+                and time.perf_counter() < deadline
+            ):
                 kind, payload = self.rx_queue.get_nowait()
+                processed += 1
                 if kind == "line":
                     line = str(payload)
                     self._append_log("rx", f"RX  {line}\n", "rs485")
@@ -1333,6 +1511,8 @@ class EasyMotorApp(tk.Tk):
                     self._on_wave_frame(payload)
                 elif kind == "wave_stats":
                     self._on_wave_stats_frame(payload)
+                elif kind == "wave_single":
+                    self._on_wave_single_frame(payload)
                 elif kind == "can_tx":
                     self._append_log("tx", f"CAN TX {format_frame(payload)}\n", "can")
                 elif kind == "can_frame":
@@ -1341,6 +1521,38 @@ class EasyMotorApp(tk.Tk):
                     self._append_log("error", f"USB-CAN error: {payload}\n", "can")
                     if self.connected and self.active_interface == "can":
                         self._disconnect_can()
+                elif kind == "can_refresh_sent":
+                    self.command_refresh_count = int(payload)
+                    if self.pulse_active:
+                        remaining_ms = max(
+                            0, int((self.pulse_deadline - time.monotonic()) * 1000)
+                        )
+                        self.command_refresh_var.set(
+                            f"CAN command refresh: timed, about {remaining_ms} ms remaining"
+                        )
+                    elif self.continuous_active:
+                        self.command_refresh_var.set(
+                            f"CAN command refresh: active (sent={self.command_refresh_count})"
+                        )
+                elif kind == "can_refresh_timeout":
+                    self._append_log(
+                        "error",
+                        "CAN feedback timeout; Type 1 refresh stopped and Type 4 stop sent.\n",
+                    )
+                    self.stop_motor()
+                elif kind == "can_refresh_motor_exit":
+                    self._append_log(
+                        "error",
+                        "MCU left MOTOR mode; Type 1 refresh stopped and Type 4 stop sent.\n",
+                    )
+                    self.stop_motor()
+                elif kind == "can_timed_deadline":
+                    if self.pulse_active:
+                        self._append_log("event", "Timed run deadline reached; Type 4 stop sent.\n")
+                        self.stop_motor()
+                elif kind == "can_refresh_error":
+                    self._append_log("error", f"CAN command refresh failed: {payload}\n")
+                    self.stop_motor()
                 else:
                     self._append_log("error", f"串口错误: {payload}\n", "rs485")
                     if self.serial_port is not None:
@@ -1351,7 +1563,12 @@ class EasyMotorApp(tk.Tk):
             self._poll_start_sequence()
         except Exception as exc:  # Keep the keepalive/sequence loop alive.
             self._append_log("error", f"轮询异常: {exc!r}\n", "app")
-        self.after(20, self._process_rx_queue)
+        next_interval = (
+            RX_QUEUE_BUSY_INTERVAL_MS
+            if not self.rx_queue.empty()
+            else RX_QUEUE_INTERVAL_MS
+        )
+        self.after(next_interval, self._process_rx_queue)
 
     def _handle_can_frame(self, frame: CanFrame) -> None:
         if self.can_parameter_panel.handle_frame(frame):
@@ -1370,7 +1587,15 @@ class EasyMotorApp(tk.Tk):
                 transport = self.can_transport
                 if transport is not None:
                     try:
-                        transport.set_active_report(True)
+                        # Type 1/3/4 already receive an immediate Type 2
+                        # response.  Keep Type 24 periodic reporting off so
+                        # each feedback frame observed during motion is a
+                        # real command acknowledgement.  The firmware's
+                        # 10 ms default report interval otherwise creates a
+                        # continuous 100 Hz uplink that can starve downlink
+                        # commands in some serial USB-CAN adapters.
+                        transport.set_active_report(False)
+                        self.can_active_report_enabled = False
                     except (serial.SerialException, OSError, RuntimeError) as exc:
                         self._append_log("error", f"USB-CAN report setup failed: {exc}\n", "can")
             self._update_control_state()
@@ -1384,10 +1609,33 @@ class EasyMotorApp(tk.Tk):
                 self._append_log("rx", f"CAN RX {format_frame(frame)}\n", "can")
             if feedback.mode == MODE_RESET:
                 self.mci_state = 0
+                if (
+                    not self.start_waiting
+                    and self.can_active_report_enabled
+                    and self.can_transport is not None
+                ):
+                    try:
+                        self.can_transport.set_active_report(False)
+                        self.can_active_report_enabled = False
+                    except (serial.SerialException, OSError, RuntimeError) as exc:
+                        self._append_log(
+                            "error", f"USB-CAN report disable failed: {exc}\n", "can"
+                        )
             elif feedback.mode == MODE_CALIBRATING:
                 self.mci_state = 2
             elif feedback.mode == MODE_MOTOR:
                 self.mci_state = 6
+                if self.can_active_report_enabled and self.can_transport is not None:
+                    try:
+                        # Alignment needs unsolicited feedback to announce the
+                        # transition to MOTOR. Once there, every Type 1 command
+                        # returns Type 2, so remove the 100 Hz Type 24 stream.
+                        self.can_transport.set_active_report(False)
+                        self.can_active_report_enabled = False
+                    except (serial.SerialException, OSError, RuntimeError) as exc:
+                        self._append_log(
+                            "error", f"USB-CAN report disable failed: {exc}\n", "can"
+                        )
             else:
                 self.mci_state = None
             self.state_var.set(
@@ -1753,12 +2001,30 @@ class EasyMotorApp(tk.Tk):
             dec = max(1, min(100, self.wave_dec_var.get()))
             self.wave_dec_var.set(dec)
             use_stats = self.wave_stats_var.get()
-            command = (
-                f"wave stats on 100" if use_stats else f"wave on {dec}"
-            )
+            use_single = self.wave_single_var.get()
+            single_channel = self.wave_single_channel_var.get().strip().lower()
+            if single_channel not in {"u", "v", "w"}:
+                single_channel = "u"
+                self.wave_single_channel_var.set("U")
+            if use_single:
+                for channel, variable in (
+                    ("u", self.wave_u_var),
+                    ("v", self.wave_v_var),
+                    ("w", self.wave_w_var),
+                ):
+                    variable.set(channel == single_channel)
+                command = f"wave single on {single_channel}"
+                self._wave_sample_rate_hz = 50_000.0
+            elif use_stats:
+                command = "wave stats on 100"
+                self._wave_sample_rate_hz = 500.0
+            else:
+                command = f"wave on {dec}"
+                self._wave_sample_rate_hz = 50_000.0 / dec
             if self.send_command(command):
                 self.streaming = True
                 self._wave_last_seq = None
+                self._wave_single_last_dropped = None
                 self._wave_frame_count = 0
                 self._wave_lost_count = 0
                 self._wave_glitch_count = 0
@@ -1767,8 +2033,13 @@ class EasyMotorApp(tk.Tk):
                 for buf in self._wave_buffers.values():
                     buf.clear()
                 self._wave_stats_entries.clear()
+                self._reset_wave_display_envelopes()
                 self._open_wave_csv()
-                if use_stats:
+                if use_single:
+                    self.wave_status_var.set(
+                        f"波形: 启动中 (单路全采样 {single_channel.upper()}, 50 ksample/s)"
+                    )
+                elif use_stats:
                     self.wave_status_var.set("波形: 启动中 (包络, 500 Hz)")
                 else:
                     self.wave_status_var.set(
@@ -1779,6 +2050,35 @@ class EasyMotorApp(tk.Tk):
             if self.send_command("wave off"):
                 self._wave_off_deadline = time.monotonic() + 2.0
                 self.wave_status_var.set("波形: 停止中...")
+
+    def _reset_wave_display_envelopes(self) -> None:
+        """Reset the bounded, incrementally built display-only envelopes."""
+        for entries in self._wave_display_entries.values():
+            entries.clear()
+        for channel in self._wave_display_accumulators:
+            self._wave_display_accumulators[channel] = None
+        self._wave_display_bucket_samples = max(
+            1,
+            round(self._wave_sample_rate_hz / WAVE_DISPLAY_ENVELOPE_HZ),
+        )
+
+    def _append_wave_display_sample(
+        self, channel: str, seq: int, value: int
+    ) -> None:
+        """Accumulate raw samples into 1 ms min/max entries without rescanning."""
+        accumulator = self._wave_display_accumulators[channel]
+        if accumulator is None:
+            accumulator = [seq, 1, value, value]
+            self._wave_display_accumulators[channel] = accumulator
+        else:
+            accumulator[1] += 1
+            accumulator[2] = min(accumulator[2], value)
+            accumulator[3] = max(accumulator[3], value)
+        if accumulator[1] >= self._wave_display_bucket_samples:
+            self._wave_display_entries[channel].append(
+                (accumulator[0], accumulator[2], accumulator[3])
+            )
+            self._wave_display_accumulators[channel] = None
 
     def _on_wave_frame(self, frame: tuple[int, int, int, int]) -> None:
         seq, iu, iv, iw = frame
@@ -1811,6 +2111,9 @@ class EasyMotorApp(tk.Tk):
         self._wave_buffers["u"].append((seq, iu))
         self._wave_buffers["v"].append((seq, iv))
         self._wave_buffers["w"].append((seq, iw))
+        self._append_wave_display_sample("u", seq, iu)
+        self._append_wave_display_sample("v", seq, iv)
+        self._append_wave_display_sample("w", seq, iw)
         if self._wave_csv_file is not None:
             self._wave_csv_rows.append(f"{seq},{iu},{iv},{iw}\n")
             if len(self._wave_csv_rows) >= 500:
@@ -1827,6 +2130,53 @@ class EasyMotorApp(tk.Tk):
         self._wave_last_seq = seq
         self._wave_frame_count += 1
         self._wave_stats_entries.append((seq, values))
+
+    def _on_wave_single_frame(
+        self, frame: tuple[int, int, int, tuple[int, ...]]
+    ) -> None:
+        seq_start, channel_index, dropped, samples = frame
+        channel = ("u", "v", "w")[channel_index]
+        if self._wave_last_seq is not None:
+            expected = (self._wave_last_seq + 1) & 0xFFFF
+            if seq_start != expected:
+                self._wave_lost_count += (seq_start - expected) & 0xFFFF
+        if self._wave_single_last_dropped is None:
+            self._wave_lost_count += dropped
+        else:
+            self._wave_lost_count += (
+                dropped - self._wave_single_last_dropped
+            ) & 0xFFFF
+        self._wave_single_last_dropped = dropped
+        previous = self._wave_prev_raw[channel_index] if self._wave_prev_raw else None
+        for offset, value in enumerate(samples):
+            seq = (seq_start + offset) & 0xFFFF
+            self._wave_buffers[channel].append((seq, value))
+            self._append_wave_display_sample(channel, seq, value)
+            if previous is not None and abs(value - previous) > WAVE_GLITCH_LSB:
+                self._wave_glitch_count += 1
+            previous = value
+            if self._wave_csv_file is not None:
+                fields = ["", "", ""]
+                fields[channel_index] = str(value)
+                self._wave_csv_rows.append(
+                    f"{seq},{fields[0]},{fields[1]},{fields[2]}\n"
+                )
+        if samples:
+            previous_values = list(self._wave_prev_raw or (0, 0, 0))
+            previous_values[channel_index] = samples[-1]
+            self._wave_prev_raw = tuple(previous_values)
+            self._wave_last_seq = (seq_start + len(samples) - 1) & 0xFFFF
+            self._wave_frame_count += len(samples)
+        if len(self._wave_csv_rows) >= 500:
+            self._flush_wave_csv()
+
+    def _select_wave_envelope(self) -> None:
+        if self.wave_stats_var.get():
+            self.wave_single_var.set(False)
+
+    def _select_wave_single(self) -> None:
+        if self.wave_single_var.get():
+            self.wave_stats_var.set(False)
 
     def _open_wave_csv(self) -> None:
         if not self.wave_save_var.get():
@@ -1912,31 +2262,61 @@ class EasyMotorApp(tk.Tk):
             state="readonly",
         )
         self.wave_scale_combo.grid(row=0, column=4, padx=(0, 8))
+        ttk.Label(tools, text="时间窗").grid(
+            row=0, column=5, padx=(4, 4)
+        )
+        self.wave_time_window_combo = ttk.Combobox(
+            tools,
+            textvariable=self.wave_time_window_var,
+            values=WAVE_TIME_WINDOWS,
+            width=7,
+            state="readonly",
+        )
+        self.wave_time_window_combo.grid(row=0, column=6, padx=(0, 8))
         ttk.Checkbutton(tools, text="U", variable=self.wave_u_var).grid(
-            row=0, column=5, padx=2
-        )
-        ttk.Checkbutton(tools, text="V", variable=self.wave_v_var).grid(
-            row=0, column=6, padx=2
-        )
-        ttk.Checkbutton(tools, text="W", variable=self.wave_w_var).grid(
             row=0, column=7, padx=2
         )
+        ttk.Checkbutton(tools, text="V", variable=self.wave_v_var).grid(
+            row=0, column=8, padx=2
+        )
+        ttk.Checkbutton(tools, text="W", variable=self.wave_w_var).grid(
+            row=0, column=9, padx=2
+        )
         ttk.Label(tools, textvariable=self.wave_status_var).grid(
-            row=0, column=8, padx=(12, 0), sticky="w"
+            row=0, column=10, padx=(12, 0), sticky="w"
         )
         ttk.Checkbutton(
             tools, text="自动保存CSV", variable=self.wave_save_var
-        ).grid(row=1, column=4, padx=(8, 4), pady=(4, 0))
+        ).grid(row=1, column=5, padx=(8, 4), pady=(4, 0))
         ttk.Checkbutton(
-            tools, text="包络模式(减带宽)", variable=self.wave_stats_var
+            tools,
+            text="包络模式(减带宽)",
+            variable=self.wave_stats_var,
+            command=self._select_wave_envelope,
         ).grid(row=1, column=2, padx=(8, 4), pady=(4, 0))
+        ttk.Checkbutton(
+            tools,
+            text="单路全采样",
+            variable=self.wave_single_var,
+            command=self._select_wave_single,
+        ).grid(row=1, column=3, padx=(8, 4), pady=(4, 0))
+        self.wave_single_channel_combo = ttk.Combobox(
+            tools,
+            textvariable=self.wave_single_channel_var,
+            values=("U", "V", "W"),
+            width=3,
+            state="readonly",
+        )
+        self.wave_single_channel_combo.grid(
+            row=1, column=4, padx=(0, 8), pady=(4, 0)
+        )
         ttk.Button(
             tools, text="保存波形", command=self.save_wave_snapshot
         ).grid(row=1, column=0, padx=(0, 8), pady=(4, 0))
         ttk.Button(
             tools, text="导出日志", command=self.export_log
         ).grid(row=1, column=1, padx=(0, 8), pady=(4, 0))
-        tools.columnconfigure(9, weight=1)
+        tools.columnconfigure(11, weight=1)
         self.wave_popup = win
         self.wave_popup_canvas = tk.Canvas(
             win, background=WAVE_BACKGROUND, highlightthickness=0
@@ -1969,14 +2349,24 @@ class EasyMotorApp(tk.Tk):
                 "wave_snapshot_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv",
             )
             buffers = [list(self._wave_buffers[ch]) for ch in ("u", "v", "w")]
-            count = min((len(buf) for buf in buffers), default=0)
             with open(path, "w", encoding="ascii", newline="") as handle:
                 handle.write("seq,iu,iv,iw\n")
-                for index in range(count):
-                    seq_u, iu = buffers[0][index]
-                    _, iv = buffers[1][index]
-                    _, iw = buffers[2][index]
-                    handle.write(f"{seq_u},{iu},{iv},{iw}\n")
+                if self.wave_single_var.get():
+                    channel_index = {"U": 0, "V": 1, "W": 2}.get(
+                        self.wave_single_channel_var.get(), 0
+                    )
+                    for seq, value in buffers[channel_index]:
+                        fields = ["", "", ""]
+                        fields[channel_index] = str(value)
+                        handle.write(f"{seq},{fields[0]},{fields[1]},{fields[2]}\n")
+                    count = len(buffers[channel_index])
+                else:
+                    count = min((len(buf) for buf in buffers), default=0)
+                    for index in range(count):
+                        seq_u, iu = buffers[0][index]
+                        _, iv = buffers[1][index]
+                        _, iw = buffers[2][index]
+                        handle.write(f"{seq_u},{iu},{iv},{iw}\n")
             self._append_log(
                 "event", f"波形快照已保存: {path} ({count} 帧)\n"
             )
@@ -2036,13 +2426,35 @@ class EasyMotorApp(tk.Tk):
                 "w": self.wave_w_var.get(),
             }
             series: dict[str, list[tuple[int, int]]] = {}
+            envelope_series: dict[str, list[tuple[int, int, int]]] = {}
             values: list[int] = []
-            for channel in ("u", "v", "w"):
-                buf = self._wave_buffers[channel]
-                if show[channel] and buf:
-                    series[channel] = list(buf)
-                    values.extend(value for _, value in buf)
-            stats_entries = list(self._wave_stats_entries)
+            time_window_s = parse_wave_time_window(self.wave_time_window_var.get())
+            display_count = max(2, int(self._wave_sample_rate_hz * time_window_s))
+            use_display_envelope = (
+                time_window_s > 0.2 and not self.wave_stats_var.get()
+            )
+            if use_display_envelope:
+                envelope_count = max(
+                    2, int(time_window_s * WAVE_DISPLAY_ENVELOPE_HZ)
+                )
+                for channel in ("u", "v", "w"):
+                    entries = self._wave_display_entries[channel]
+                    if show[channel] and entries:
+                        start = max(0, len(entries) - envelope_count)
+                        visible_entries = list(islice(entries, start, None))
+                        envelope_series[channel] = visible_entries
+                        for _, low, high in visible_entries:
+                            values.extend((low, high))
+            else:
+                for channel in ("u", "v", "w"):
+                    buf = self._wave_buffers[channel]
+                    if show[channel] and buf:
+                        start = max(0, len(buf) - display_count)
+                        visible = list(islice(buf, start, None))
+                        series[channel] = visible
+                        values.extend(value for _, value in visible)
+            stats_start = max(0, len(self._wave_stats_entries) - display_count)
+            stats_entries = list(islice(self._wave_stats_entries, stats_start, None))
             for _, stats_values in stats_entries:
                 values.extend(stats_values)
             scale_text = self.wave_scale_var.get()
@@ -2074,10 +2486,29 @@ class EasyMotorApp(tk.Tk):
                     fill=WAVE_LABEL, tags="wave",
                 )
                 canvas.create_text(
-                    6, height - 8, anchor="sw", text=f"{y_min:.0f}",
+                    6, height - 26, anchor="sw", text=f"{y_min:.0f}",
                     fill=WAVE_LABEL, tags="wave",
                 )
+                canvas.create_text(
+                    6,
+                    height - 8,
+                    anchor="sw",
+                    text=f"-{time_window_s:g} s",
+                    fill=WAVE_LABEL,
+                    tags="wave",
+                )
+                canvas.create_text(
+                    width - 6,
+                    height - 8,
+                    anchor="se",
+                    text="0 s",
+                    fill=WAVE_LABEL,
+                    tags="wave",
+                )
                 for channel, points in series.items():
+                    source_count = len(points)
+                    compressed = source_count > int(width) * 2
+                    points = compress_wave_points(points, max(1, int(width)))
                     count = len(points)
                     if count < 2:
                         continue
@@ -2089,7 +2520,11 @@ class EasyMotorApp(tk.Tk):
                             height
                             - (value - y_min) / (y_max - y_min) * height
                         )
-                        if index > 0 and ((seq - prev_seq) & 0xFFFF) != 1:
+                        if (
+                            not compressed
+                            and index > 0
+                            and ((seq - prev_seq) & 0xFFFF) != 1
+                        ):
                             if len(coords) >= 4:
                                 canvas.create_line(
                                     coords, fill=colors[channel], width=1,
@@ -2102,6 +2537,33 @@ class EasyMotorApp(tk.Tk):
                         canvas.create_line(
                             coords, fill=colors[channel], width=1, tags="wave"
                         )
+                for channel, entries in envelope_series.items():
+                    entries = compress_envelope_entries(
+                        entries, max(1, int(width))
+                    )
+                    count = len(entries)
+                    if count < 2:
+                        continue
+                    envelope_coords: list[float] = []
+                    for index, (_, min_value, max_value) in enumerate(entries):
+                        x = index / (count - 1) * width
+                        y1 = (
+                            height
+                            - (min_value - y_min) / (y_max - y_min) * height
+                        )
+                        y2 = (
+                            height
+                            - (max_value - y_min) / (y_max - y_min) * height
+                        )
+                        # Keep both extrema in one polyline so this reads as
+                        # one waveform band, not two independent channels.
+                        envelope_coords.extend((x, y1, x, y2))
+                    canvas.create_line(
+                        envelope_coords,
+                        fill=colors[channel],
+                        width=1,
+                        tags="wave",
+                    )
                 stats_count = len(stats_entries)
                 if stats_count >= 2:
                     for index, (_, stats_values) in enumerate(stats_entries):
@@ -2132,14 +2594,23 @@ class EasyMotorApp(tk.Tk):
                 )
         except Exception as exc:  # Keep the redraw loop alive on UI hiccups.
             self._append_log("error", f"波形绘制异常: {exc!r}\n")
-        self.after(50, self._wave_redraw)
+        self.after(WAVE_REDRAW_INTERVAL_MS, self._wave_redraw)
 
     def start_motor(self) -> bool:
         if self.can_transport is None:
             return False
         try:
+            # Type 3 initially reports CALI. Temporarily enable Type 24 so
+            # the later transition into MOTOR is visible without RS485.
+            self.can_transport.set_active_report(True)
+            self.can_active_report_enabled = True
             self.can_transport.enable()
         except (serial.SerialException, OSError, RuntimeError) as exc:
+            self.can_active_report_enabled = False
+            try:
+                self.can_transport.set_active_report(False)
+            except (serial.SerialException, OSError, RuntimeError):
+                pass
             self._append_log("error", f"CAN enable failed: {exc}\n")
             return False
         self._append_log("event", "CAN Type 3 enable sent; waiting for Type 2 MOTOR feedback.\n")
@@ -2192,6 +2663,7 @@ class EasyMotorApp(tk.Tk):
             return False
         self.motion_command_active = value != 0
         if value == 0:
+            self.can_command_refresher.stop()
             self.continuous_active = False
             self.command_refresh_var.set("CAN command refresh: idle")
         else:
@@ -2214,6 +2686,9 @@ class EasyMotorApp(tk.Tk):
         if not self.send_speed(command_rpm):
             return
         self.continuous_active = True
+        self.command_refresh_count = 0
+        assert self.can_transport is not None
+        self.can_command_refresher.start(self.can_transport, command_rpm)
         self.command_refresh_var.set(
             f"CAN command refresh: continuous {command_rpm} motor rpm"
         )
@@ -2240,6 +2715,13 @@ class EasyMotorApp(tk.Tk):
             return
         self.pulse_active = True
         self.pulse_deadline = time.monotonic() + duration_ms / 1000.0
+        self.command_refresh_count = 0
+        assert self.can_transport is not None
+        self.can_command_refresher.start(
+            self.can_transport,
+            command_rpm,
+            deadline=self.pulse_deadline,
+        )
         self.command_refresh_var.set(
             f"CAN command refresh: timed {command_rpm} motor rpm, {duration_ms} ms"
         )
@@ -2259,6 +2741,7 @@ class EasyMotorApp(tk.Tk):
         self.after(20, self._pulse_watchdog_tick)
 
     def stop_motor(self) -> None:
+        self.can_command_refresher.stop()
         self.demo_service.cancel()
         self.demo_view.reset_continuous()
         self.pulse_active = False
@@ -2299,42 +2782,6 @@ class EasyMotorApp(tk.Tk):
         self._append_log(
             "error", "CAN Stop 未获得确认；停止命令刷新，等待 MCU 看门狗停机。\n"
         )
-
-    def _can_command_refresh_tick(self) -> None:
-        try:
-            if (
-                self.connected
-                and self.active_interface == "can"
-                and self.motion_command_active
-                and self.can_last_feedback_time > 0.0
-                and time.monotonic() - self.can_last_feedback_time > 0.75
-            ):
-                self._append_log("error", "CAN feedback timeout; stopping command refresh.\n")
-                self.stop_motor()
-            if (
-                self.connected
-                and self.active_interface == "can"
-                and (self.pulse_active or self.continuous_active)
-                and self.motion_command_active
-                and self.can_transport is not None
-            ):
-                self.can_transport.command_velocity(self.can_command_rpm)
-                self.command_refresh_count += 1
-                if self.pulse_active:
-                    remaining_ms = max(
-                        0, int((self.pulse_deadline - time.monotonic()) * 1000)
-                    )
-                    self.command_refresh_var.set(
-                        f"CAN command refresh: timed, about {remaining_ms} ms remaining"
-                    )
-                else:
-                    self.command_refresh_var.set(
-                        f"CAN command refresh: active (sent={self.command_refresh_count})"
-                    )
-        except Exception as exc:
-            self._append_log("error", f"CAN command refresh failed: {exc}\n")
-            self.stop_motor()
-        self.after(COMMAND_REFRESH_INTERVAL_MS, self._can_command_refresh_tick)
 
     def _update_control_state(self) -> None:
         self._render_demo_view()
@@ -2544,6 +2991,7 @@ class EasyMotorApp(tk.Tk):
                 pass
             self.update_dialog = None
         self.disconnect()
+        self.can_command_refresher.close()
         self.quit()
         self.destroy()
 

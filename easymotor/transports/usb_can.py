@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from collections.abc import Callable
 
 import serial
@@ -17,6 +18,7 @@ from easymotor.protocols.can_motor import (
     build_stop,
     build_velocity_control,
     encode_at_frame,
+    parse_feedback,
 )
 
 
@@ -42,10 +44,21 @@ class UsbCanMotorTransport:
         self._write_lock = threading.Lock()
         self._reader_stop = threading.Event()
         self._reader_thread: threading.Thread | None = None
+        self._last_feedback_time = 0.0
+        self._last_feedback_mode: int | None = None
 
     @property
     def connected(self) -> bool:
         return self._connection is not None
+
+    @property
+    def last_feedback_time(self) -> float:
+        """Monotonic receive time updated before the UI queue is serviced."""
+        return self._last_feedback_time
+
+    @property
+    def last_feedback_mode(self) -> int | None:
+        return self._last_feedback_mode
 
     def connect(self, port: str) -> None:
         if self.connected:
@@ -61,6 +74,8 @@ class UsbCanMotorTransport:
         )
         connection.reset_input_buffer()
         self._connection = connection
+        self._last_feedback_time = 0.0
+        self._last_feedback_mode = None
         self._reader_stop.clear()
         self._reader_thread = threading.Thread(
             target=self._reader_loop, name="easymotor-usb-can", daemon=True
@@ -120,4 +135,8 @@ class UsbCanMotorTransport:
             if not chunk:
                 continue
             for frame in decoder.feed(chunk):
+                feedback = parse_feedback(frame)
+                if feedback is not None:
+                    self._last_feedback_time = time.monotonic()
+                    self._last_feedback_mode = feedback.mode
                 self.event_queue.put(("can_frame", frame))

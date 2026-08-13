@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 
-VERSION: Final = (1, 0, 0)
+VERSION: Final = (1, 0, 1)
 __version__: Final = ".".join(str(part) for part in VERSION)
 
 

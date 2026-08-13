@@ -31,6 +31,13 @@ RS485 Debug  UART5 状态、遥测与波形
 Logs         All / CAN / RS485 Debug / Application 四路视图
 ```
 
+RS485 Debug 波特率由连接区选择，默认与 Engineering Debug 固件一致为
+4 Mbps，同时允许常用预设和自定义整数。波形传输支持三相分频原始帧、三相
+min/max 包络帧，以及一路 128 点分块全采样帧；单路模式在当前 50 kHz FOC 下
+覆盖每一个控制周期采样，不改变 PWM、FOC 或 ADC 触发频率。显示层提供
+30 ms 至 5 s 时间窗，并按画布像素聚合每列最小值/最大值，限制 Tk 绘图负载的
+同时保留噪声尖峰；原始接收与 CSV 路径不做显示抽取。
+
 ## 统一控制链
 
 ```text
