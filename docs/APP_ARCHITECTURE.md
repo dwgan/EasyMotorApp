@@ -38,6 +38,10 @@ min/max 包络帧，以及一路 128 点分块全采样帧；单路模式在当�
 30 ms 至 5 s 时间窗，并按画布像素聚合每列最小值/最大值，限制 Tk 绘图负载的
 同时保留噪声尖峰；原始接收与 CSV 路径不做显示抽取。
 
+波形接收线程以有界批次队列向 UI 交付数据，界面短时阻塞时会丢弃最旧批次而不是无限增长
+内存，并分别统计 UART 序号缺口、固件环形缓冲丢弃、主机批次丢弃和解码校验错误。二进制
+解码缓存也设置上限；校验失败只丢弃候选帧头并重新同步，避免噪声伪帧吞掉后续有效帧。
+
 ## 统一控制链
 
 ```text
@@ -66,11 +70,14 @@ Type 4；MCU 的速度限幅、编码器门控和 1 秒命令看门狗仍是最�
 
 ```text
 easymotor_app.py                           唯一启动入口和应用控制器
+easymotor/controllers/waveform.py         有界波形缓存、显示包络和丢帧统计
 easymotor/core/safety_policy.py           演示档位、时长与计划校验
 easymotor/i18n.py                          中英文产品文本
+easymotor/models/telemetry.py             CPU/编码器强类型遥测模型
 easymotor/services/demo_service.py        演示准备/运行状态
 easymotor/services/endurance_service.py   CAN 长稳状态机
 easymotor/protocols/can_motor.py           CAN 电机协议编解码
+easymotor/protocols/waveform.py            UART5 二进制波形流解码
 easymotor/transports/usb_can.py            官方 USB-CAN 传输
 easymotor/features/demo/view.py           默认演示页面
 easymotor/features/can_parameters/panel.py 共享主 transport 的 CAN 参数面板
@@ -87,13 +94,15 @@ Python 文件名和通用类名不包含具体电机型号。设备兼容性和�
 
 ## 后续拆分顺序
 
-后续可按独立提交继续从 `easymotor_app.py` 提取：
+本轮已经从 `easymotor_app.py` 提取工程遥测模型、波形协议解码和有界波形缓存。CAN 启动
+状态仍保持现有台架验证过的单一状态链，没有并行引入第二套会话状态源。主窗口暂时仍负责
+Tk 控件编排、串口线程和安全动作调度，以避免一次重构改变已验证的命令时序。后续可按独立
+提交继续提取：
 
 1. 串口连接与设备服务；
 2. CAN 电机启动、速度命令刷新和 Stop 服务；
-3. 遥测解析与状态模型；
-4. 波形功能；
-5. 工程日志和诊断页面。
+3. 波形窗口视图；
+4. 工程日志和诊断页面。
 
 每次拆分必须保持现有协议字节、命令顺序、限值和硬件行为不变，并先通过软件测试，再由
 工程师进行真实台架验收。

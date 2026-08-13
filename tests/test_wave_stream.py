@@ -11,6 +11,8 @@ from easymotor_app import (
     parse_debug_baud,
     parse_wave_time_window,
 )
+from easymotor.controllers.waveform import WaveformStore
+from easymotor.protocols.waveform import WAVE_PENDING_MAX, WaveFrameDecoder
 
 
 def _single_channel_frame(
@@ -136,6 +138,59 @@ class SingleChannelWaveFrameTests(unittest.TestCase):
         self.assertEqual(app._wave_lost_count, 3)
         self.assertEqual(list(app._wave_buffers["w"]), [(10, 100), (11, 101), (12, 102)])
         self.assertEqual(app._wave_frame_count, 3)
+
+    def test_decoder_resynchronizes_after_bad_checksum(self):
+        decoder = WaveFrameDecoder()
+        bad = bytearray(_single_channel_frame(1, 0, (10, 20)))
+        bad[-1] ^= 0x55
+        good = _single_channel_frame(3, 0, (30, 40))
+        pending = bad + good
+
+        events = decoder.extract(pending)
+
+        self.assertEqual(events[-1], ("wave_single", (3, 0, 0, (30, 40))))
+        self.assertGreaterEqual(decoder.checksum_errors, 1)
+        self.assertFalse(pending)
+
+    def test_decoder_bounds_unframed_noise(self):
+        decoder = WaveFrameDecoder()
+        pending = bytearray(b"x" * (WAVE_PENDING_MAX + 123))
+
+        self.assertEqual(decoder.extract(pending), [])
+        self.assertEqual(len(pending), WAVE_PENDING_MAX)
+        self.assertEqual(decoder.discarded_bytes, 123)
+
+    def test_reader_wave_batches_are_bounded_and_accounted(self):
+        app = object.__new__(EasyMotorApp)
+        app.rx_queue = queue.Queue()
+        app.wave_batch_queue = queue.Queue(maxsize=1)
+        app.wave_decoder = WaveFrameDecoder()
+        app._wave_host_queue_drop_count = 0
+
+        app._extract_wave_frames(bytearray(_single_channel_frame(1, 0, (10,))))
+        app._extract_wave_frames(bytearray(_single_channel_frame(2, 0, (20,))))
+
+        self.assertEqual(app.wave_batch_queue.qsize(), 1)
+        self.assertEqual(app._wave_host_queue_drop_count, 1)
+        self.assertEqual(app.wave_batch_queue.get_nowait()[0][1][0], 2)
+
+
+class WaveformStoreLossTests(unittest.TestCase):
+    def test_three_phase_gap_counts_each_missing_frame_and_wraps(self):
+        store = WaveformStore(raw_capacity=20, display_capacity=20, glitch_threshold=60)
+        store.ingest_three_phase((0xFFFF, 0, 0, 0))
+        store.ingest_three_phase((2, 0, 0, 0))
+
+        self.assertEqual(store.transport_lost_count, 2)
+        self.assertEqual(store.lost_count, 2)
+
+    def test_firmware_drop_counter_wrap_is_separate(self):
+        store = WaveformStore(raw_capacity=20, display_capacity=20, glitch_threshold=60)
+        store.ingest_single((10, 0, 0xFFFE, (1,)))
+        store.ingest_single((11, 0, 1, (2,)))
+
+        self.assertEqual(store.firmware_drop_count, 0xFFFE + 3)
+        self.assertEqual(store.transport_lost_count, 0)
 
 
 if __name__ == "__main__":
