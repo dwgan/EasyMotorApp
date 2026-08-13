@@ -86,6 +86,21 @@ class WaveDisplayTests(unittest.TestCase):
 
 
 class SingleChannelWaveFrameTests(unittest.TestCase):
+    def test_rs485_event_queue_drops_oldest_without_touching_can_queue(self):
+        app = object.__new__(EasyMotorApp)
+        app.rx_queue = queue.Queue()
+        app.rs485_rx_queue = queue.Queue(maxsize=2)
+        app._rs485_queue_drop_count = 0
+
+        app._put_rs485_event(("line", "first"))
+        app._put_rs485_event(("line", "second"))
+        app._put_rs485_event(("line", "third"))
+
+        self.assertTrue(app.rx_queue.empty())
+        self.assertEqual(app._rs485_queue_drop_count, 1)
+        self.assertEqual(app.rs485_rx_queue.get_nowait(), ("line", "second"))
+        self.assertEqual(app.rs485_rx_queue.get_nowait(), ("line", "third"))
+
     def test_fragmented_full_sample_block_is_decoded(self):
         app = object.__new__(EasyMotorApp)
         app.rx_queue = queue.Queue()
@@ -176,6 +191,14 @@ class SingleChannelWaveFrameTests(unittest.TestCase):
 
 
 class WaveformStoreLossTests(unittest.TestCase):
+    def test_raw_sample_ring_is_bounded_and_preserves_order(self):
+        store = WaveformStore(raw_capacity=3, display_capacity=2, glitch_threshold=60)
+        for sequence in range(5):
+            store.ingest_three_phase((sequence, sequence, 0, 0))
+
+        self.assertEqual(list(store.raw["u"]), [(2, 2), (3, 3), (4, 4)])
+        self.assertEqual(store.raw["u"]._values.itemsize, 2)
+
     def test_three_phase_gap_counts_each_missing_frame_and_wraps(self):
         store = WaveformStore(raw_capacity=20, display_capacity=20, glitch_threshold=60)
         store.ingest_three_phase((0xFFFF, 0, 0, 0))

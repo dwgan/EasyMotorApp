@@ -275,6 +275,7 @@ RX_QUEUE_INTERVAL_MS = 20
 RX_QUEUE_BUSY_INTERVAL_MS = 1
 RX_QUEUE_BUDGET_MS = 6.0
 RX_QUEUE_MAX_ITEMS = 64
+RS485_EVENT_QUEUE_MAX = 1024
 WAVE_BATCH_QUEUE_MAX = 8
 
 
@@ -368,6 +369,10 @@ class EasyMotorApp(tk.Tk):
         self.serial_port: serial.Serial | None = None
         self.serial_lock = threading.Lock()
         self.rx_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.rs485_rx_queue: queue.Queue[tuple[str, object]] = queue.Queue(
+            maxsize=RS485_EVENT_QUEUE_MAX
+        )
+        self._rs485_queue_drop_count = 0
         self.wave_batch_queue: queue.Queue[list[tuple[str, object]]] = queue.Queue(
             maxsize=WAVE_BATCH_QUEUE_MAX
         )
@@ -1135,6 +1140,21 @@ class EasyMotorApp(tk.Tk):
                     foc_peak=self._legacy_foc_peak_percent,
                 )
             return tr(language, "cpu_load_unknown")
+        completion = value.encoder_completion_percent
+        if completion is None:
+            encoder_rate = tr(language, "encoder_rate_unknown")
+        else:
+            encoder_rate = tr(
+                language,
+                "encoder_rate_format",
+                actual=value.encoder_completed_hz / 1000.0,
+                target=value.encoder_requested_hz / 1000.0,
+                percent=completion,
+                status=tr(
+                    language,
+                    "encoder_rate_low" if value.encoder_rate_low else "encoder_rate_ok",
+                ),
+            )
         return tr(
             language,
             "cpu_load_format",
@@ -1143,6 +1163,7 @@ class EasyMotorApp(tk.Tk):
             foc_peak=value.foc_peak_permille / 10.0,
             enc_avg=value.encoder_average_permille / 10.0,
             enc_peak=value.encoder_peak_permille / 10.0,
+            encoder_rate=encoder_rate,
         )
 
     def _format_encoder_models(self) -> str:
@@ -1458,7 +1479,7 @@ class EasyMotorApp(tk.Tk):
             try:
                 chunk = connection.read(max(connection.in_waiting, 1))
             except (serial.SerialException, OSError) as exc:
-                self.rx_queue.put(("error", str(exc)))
+                self._put_rs485_event(("error", str(exc)))
                 return
             if not chunk:
                 continue
@@ -1470,9 +1491,28 @@ class EasyMotorApp(tk.Tk):
                 while b"\n" in pending:
                     raw_line, _, pending = pending.partition(b"\n")
                     line = raw_line.rstrip(b"\r").decode("ascii", errors="replace")
-                    self.rx_queue.put(("line", line))
+                    self._put_rs485_event(("line", line))
         if pending and not self.streaming:
-            self.rx_queue.put(("line", pending.decode("ascii", errors="replace")))
+            self._put_rs485_event(
+                ("line", pending.decode("ascii", errors="replace"))
+            )
+
+    def _put_rs485_event(self, event: tuple[str, object]) -> None:
+        """Never let debug text block or starve safety-relevant CAN events."""
+        target = self.__dict__.get("rs485_rx_queue", self.rx_queue)
+        try:
+            target.put_nowait(event)
+            return
+        except queue.Full:
+            pass
+        try:
+            target.get_nowait()
+            self._rs485_queue_drop_count = (
+                self.__dict__.get("_rs485_queue_drop_count", 0) + 1
+            )
+        except queue.Empty:
+            pass
+        target.put_nowait(event)
 
     def _extract_wave_frames(self, pending: bytearray) -> None:
         """Parse raw, envelope, and single-channel block frames."""
@@ -1484,7 +1524,7 @@ class EasyMotorApp(tk.Tk):
         wave_events = [event for event in events if event[0].startswith("wave")]
         for event in events:
             if not event[0].startswith("wave"):
-                self.rx_queue.put(event)
+                self._put_rs485_event(event)
         batch_queue = self.__dict__.get("wave_batch_queue")
         if batch_queue is None:  # Supports lightweight parser unit tests.
             for event in wave_events:
@@ -1521,7 +1561,10 @@ class EasyMotorApp(tk.Tk):
                 processed < RX_QUEUE_MAX_ITEMS
                 and time.perf_counter() < deadline
             ):
-                kind, payload = self.rx_queue.get_nowait()
+                try:
+                    kind, payload = self.rx_queue.get_nowait()
+                except queue.Empty:
+                    kind, payload = self.rs485_rx_queue.get_nowait()
                 processed += 1
                 if kind == "line":
                     line = str(payload)
@@ -1594,7 +1637,7 @@ class EasyMotorApp(tk.Tk):
             self._append_log("error", f"轮询异常: {exc!r}\n", "app")
         next_interval = (
             RX_QUEUE_BUSY_INTERVAL_MS
-            if not self.rx_queue.empty()
+            if (not self.rx_queue.empty() or not self.rs485_rx_queue.empty())
             else RX_QUEUE_INTERVAL_MS
         )
         self.after(next_interval, self._process_rx_queue)

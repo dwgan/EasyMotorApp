@@ -39,9 +39,11 @@ class TranslationTests(unittest.TestCase):
                 foc_peak=45.2,
                 enc_avg=35.3,
                 enc_peak=59.6,
+                encoder_rate="Encoder completion=18.2/25.0 kHz (73%, LOW)",
             ),
             "CPU real-time=67.6% | FOC avg/peak=41.9/45.2% | "
-            "Encoder avg/peak=35.3/59.6%",
+            "Encoder avg/peak=35.3/59.6% | "
+            "Encoder completion=18.2/25.0 kHz (73%, LOW)",
         )
 
     def test_tr_results_are_not_formatted_a_second_time(self):

@@ -2,7 +2,45 @@
 
 from __future__ import annotations
 
+from array import array
 from collections import deque
+from collections.abc import Iterator
+
+
+class CompactSampleRing:
+    """Fixed-size signed sample ring with compact 16-bit storage."""
+
+    def __init__(self, capacity: int) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self.capacity = capacity
+        self._sequences = array("H", [0]) * capacity
+        self._values = array("h", [0]) * capacity
+        self._start = 0
+        self._size = 0
+
+    def clear(self) -> None:
+        self._start = 0
+        self._size = 0
+
+    def append(self, item: tuple[int, int]) -> None:
+        sequence, value = item
+        if self._size < self.capacity:
+            index = (self._start + self._size) % self.capacity
+            self._size += 1
+        else:
+            index = self._start
+            self._start = (self._start + 1) % self.capacity
+        self._sequences[index] = sequence & 0xFFFF
+        self._values[index] = value
+
+    def __len__(self) -> int:
+        return self._size
+
+    def __iter__(self) -> Iterator[tuple[int, int]]:
+        for offset in range(self._size):
+            index = (self._start + offset) % self.capacity
+            yield self._sequences[index], self._values[index]
 
 
 class WaveformStore:
@@ -16,9 +54,9 @@ class WaveformStore:
         glitch_threshold: int,
     ) -> None:
         self.raw = {
-            channel: deque(maxlen=raw_capacity) for channel in self.CHANNELS
+            channel: CompactSampleRing(raw_capacity) for channel in self.CHANNELS
         }
-        self.stats = deque(maxlen=raw_capacity)
+        self.stats = deque(maxlen=display_capacity)
         self.display = {
             channel: deque(maxlen=display_capacity) for channel in self.CHANNELS
         }

@@ -9,13 +9,27 @@ class CpuLoadTelemetryTests(unittest.TestCase):
 
         self.assertTrue(
             model.parse_line(
-                "CPU win=1000 rt=347 foc=301/612 enc=46/190 samples=50000/25000"
+                "CPU win=1000 rt=347 foc=301/612 enc=46/190 "
+                "samples=50000/18200 enc_rate=18200/25000"
             )
         )
         assert model.cpu_load is not None
         self.assertEqual(model.cpu_load.realtime_percent, 34.7)
+        self.assertEqual(model.cpu_load.encoder_completion_percent, 72.8)
+        self.assertTrue(model.cpu_load.encoder_rate_low)
         self.assertEqual(model.cpu_update_count, 1)
         self.assertIn("FOC avg/peak=30.1/61.2%", format_cpu_load(model.cpu_load))
+
+    def test_legacy_cpu_line_without_encoder_rate_remains_supported(self):
+        model = TelemetryModel()
+
+        self.assertTrue(
+            model.parse_line(
+                "CPU win=1000 rt=347 foc=301/612 enc=46/190 samples=50000/25000"
+            )
+        )
+        assert model.cpu_load is not None
+        self.assertIsNone(model.cpu_load.encoder_completion_percent)
 
     def test_unrelated_line_does_not_replace_cpu_state(self):
         model = TelemetryModel()

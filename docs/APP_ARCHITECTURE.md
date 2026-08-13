@@ -83,6 +83,11 @@ easymotor/features/demo/view.py           默认演示页面
 easymotor/features/can_parameters/panel.py 共享主 transport 的 CAN 参数面板
 ```
 
+CAN 控制事件与 RS485 调试文本使用独立队列。CAN 队列优先处理；RS485 文本队列有固定上限，
+过载时丢弃最旧的调试事件，避免日志洪流阻塞 CAN 状态处理。波形二进制帧继续使用独立的有界
+批队列，三路原始样本使用预分配的 16 位定长环形缓存，避免长时间采集时产生大量 Python
+对象和不可控内存增长。CAN Type 1 刷新仍由独立工作线程执行，不依赖 Tk 界面刷新速度。
+
 Python 文件名和通用类名不包含具体电机型号。设备兼容性和协议名称仍应在界面、配置和协议
 文档中准确说明。
 
