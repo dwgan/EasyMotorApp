@@ -21,6 +21,7 @@ class DemoView(ttk.Frame):
         *,
         port_var: tk.StringVar,
         connection_var: tk.StringVar,
+        temperature_var: tk.StringVar,
         interface_var: tk.StringVar,
         language_var: tk.StringVar,
         on_refresh: Callable[[], None],
@@ -34,6 +35,7 @@ class DemoView(ttk.Frame):
         super().__init__(master, padding=24)
         self.port_var = port_var
         self.connection_var = connection_var
+        self.temperature_var = temperature_var
         self.interface_var = interface_var
         self.language_var = language_var
         self._on_refresh = on_refresh
@@ -106,6 +108,9 @@ class DemoView(ttk.Frame):
         status = ttk.LabelFrame(self, text=tr(language, "motor_status"), padding=18)
         status.pack(fill=tk.X, pady=(18, 0))
         ttk.Label(status, textvariable=self.status_var, font=("Microsoft YaHei UI", 16)).pack(anchor="center")
+        ttk.Label(status, textvariable=self.temperature_var).pack(
+            anchor="center", pady=(8, 0)
+        )
 
         control = ttk.LabelFrame(self, text=tr(language, "demo_control"), padding=20)
         control.pack(fill=tk.BOTH, expand=True, pady=(18, 0))

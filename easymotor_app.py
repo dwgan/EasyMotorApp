@@ -49,6 +49,7 @@ from easymotor.protocols.can_motor import (
     MODE_CALIBRATING,
     MODE_MOTOR,
     MODE_RESET,
+    build_parameter_read,
     format_frame,
     parse_device_id_response,
     parse_fault_report,
@@ -425,6 +426,11 @@ class EasyMotorApp(tk.Tk):
         self.debug_connection_var = localized_var(tr(DEFAULT_LANGUAGE, "not_connected"))
         self.engineer_can_status_var = localized_var(tr(DEFAULT_LANGUAGE, "connect_first"))
         self.can_feedback_var = localized_var("CAN Type 2 反馈：尚未收到")
+        self.temperature_var = tk.StringVar()
+        self.board_temperature_c: float | None = None
+        self.motor_temperature_c: float | None = None
+        self._last_can_feedback = None
+        self._temperature_poll_index = 0
         self.engineer_can_speed_var = tk.IntVar(value=DEMO_SPEED_PRESETS_RPM[0])
         self.engineer_can_continuous_var = tk.BooleanVar(value=False)
         self.state_var = localized_var("MCI: 未知")
@@ -489,6 +495,7 @@ class EasyMotorApp(tk.Tk):
         self.refresh_ports()
         self.after(20, self._process_rx_queue)
         self.after(WAVE_REDRAW_INTERVAL_MS, self._wave_redraw)
+        self.after(1000, self._temperature_poll_tick)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -514,6 +521,7 @@ class EasyMotorApp(tk.Tk):
             self,
             port_var=self.port_var,
             connection_var=self.connection_var,
+            temperature_var=self.temperature_var,
             interface_var=self.interface_var,
             language_var=self.language_var,
             on_refresh=self.refresh_ports,
@@ -583,6 +591,9 @@ class EasyMotorApp(tk.Tk):
             font=("Microsoft YaHei UI", 12),
         ).pack(anchor="w")
         ttk.Label(overview_motor, textvariable=self.can_feedback_var).pack(
+            anchor="w", pady=(8, 0)
+        )
+        ttk.Label(overview_motor, textvariable=self.temperature_var).pack(
             anchor="w", pady=(8, 0)
         )
         ttk.Label(
@@ -699,11 +710,14 @@ class EasyMotorApp(tk.Tk):
         ttk.Label(motion_frame, textvariable=self.encoder_models_var).grid(
             row=6, column=0, sticky="w", pady=(4, 0)
         )
-        ttk.Label(motion_frame, textvariable=self.eangle_var).grid(
+        ttk.Label(motion_frame, textvariable=self.temperature_var).grid(
             row=7, column=0, sticky="w", pady=(4, 0)
         )
-        ttk.Label(motion_frame, textvariable=self.freq_var).grid(
+        ttk.Label(motion_frame, textvariable=self.eangle_var).grid(
             row=8, column=0, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(motion_frame, textvariable=self.freq_var).grid(
+            row=9, column=0, sticky="w", pady=(4, 0)
         )
         motion_frame.columnconfigure(0, weight=1)
 
@@ -775,6 +789,9 @@ class EasyMotorApp(tk.Tk):
         )
         can_feedback.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Label(can_feedback, textvariable=self.can_feedback_var).pack(anchor="w")
+        ttk.Label(can_feedback, textvariable=self.temperature_var).pack(
+            anchor="w", pady=(6, 0)
+        )
         ttk.Label(can_feedback, textvariable=self.command_refresh_var).pack(
             anchor="w", pady=(6, 0)
         )
@@ -791,6 +808,7 @@ class EasyMotorApp(tk.Tk):
             idle_getter=self._parameter_operation_idle,
             log_callback=lambda level, text: self._append_log(level, text, "can"),
             state_callback=self._update_control_state,
+            value_callback=self._on_parameter_value,
         )
         self.can_parameter_panel.pack(fill=tk.X)
 
@@ -1010,6 +1028,7 @@ class EasyMotorApp(tk.Tk):
         if not hasattr(self, "demo_view"):
             return
         language = self.language_var.get()
+        self._render_temperature_text()
         if not self.connected:
             text = tr(language, "connect_first")
         elif self.stop_pending:
@@ -1082,6 +1101,8 @@ class EasyMotorApp(tk.Tk):
         self._refresh_localized_vars()
         self.cpu_load_var.set(self._format_cpu_load())
         self.encoder_models_var.set(self._format_encoder_models())
+        self._render_temperature_text()
+        self._render_can_feedback()
         self.connection_var.set(
             (
                 f"{self.port_var.get()} | {self.active_interface.upper()}"
@@ -1426,6 +1447,10 @@ class EasyMotorApp(tk.Tk):
         self.mci_state = None
         self.state_var.set("MCI: 未知")
         self.can_feedback_var.set("CAN Type 2 反馈：尚未收到")
+        self.board_temperature_c = None
+        self.motor_temperature_c = None
+        self._last_can_feedback = None
+        self._render_temperature_text()
         self.command_refresh_count = 0
         self.command_refresh_var.set("CAN command refresh: idle")
         self._update_control_state()
@@ -1674,6 +1699,12 @@ class EasyMotorApp(tk.Tk):
             return
         feedback = parse_feedback(frame)
         if feedback is not None:
+            # Type 2 has no sensor-valid bit. Firmware uses zero until the
+            # first valid TEMP2 sample; keep the UI at "unknown" in that case.
+            if feedback.temperature_c > 0.0 or self.motor_temperature_c is not None:
+                self.motor_temperature_c = feedback.temperature_c
+            self._last_can_feedback = feedback
+            self._render_temperature_text()
             now = time.monotonic()
             self.can_last_feedback_time = now
             if now - self.can_last_feedback_log_time >= 0.25:
@@ -1714,11 +1745,7 @@ class EasyMotorApp(tk.Tk):
                 f"CAN mode={feedback.mode} faults=0x{feedback.faults:02X} "
                 f"pos={feedback.position_rad:.4f} rad vel={feedback.velocity_rad_s:.4f} rad/s"
             )
-            self.can_feedback_var.set(
-                f"CAN Type 2: mode={feedback.mode} faults=0x{feedback.faults:02X} "
-                f"pos={feedback.position_rad:.4f} rad vel={feedback.velocity_rad_s:.4f} rad/s "
-                f"torque={feedback.torque_nm:.4f} Nm temp={feedback.temperature_c:.1f} °C"
-            )
+            self._render_can_feedback()
             if feedback.faults and self._motor_activity_active() and not self.stop_pending:
                 self._append_log("error", "CAN feedback reported a fault; requesting stop.\n", "can")
                 self.stop_motor()
@@ -2677,7 +2704,11 @@ class EasyMotorApp(tk.Tk):
             return False
         self._append_log("event", "CAN Type 3 enable sent; waiting for Type 2 MOTOR feedback.\n")
         self.start_waiting = True
-        self.start_deadline = time.monotonic() + START_TIMEOUT_MS / 1000.0
+        start_time = time.monotonic()
+        # Ignore an old idle Type 2 frame when evaluating the new enable
+        # session. The first feedback timeout now starts at this Type 3 send.
+        self.can_last_feedback_time = start_time
+        self.start_deadline = start_time + START_TIMEOUT_MS / 1000.0
         self.state_var.set("MCI: 正在启动/对齐（被动监听）…")
         self._append_log(
             "event",
@@ -2994,6 +3025,70 @@ class EasyMotorApp(tk.Tk):
         if not self._parameter_operation_idle():
             raise RuntimeError("motor must remain IDLE for parameter operations")
         transport.send(frame)
+
+    def _on_parameter_value(self, index: int, value: int | float) -> None:
+        if index == 0x3005:
+            self.board_temperature_c = float(value) / 10.0
+        elif index == 0x3006:
+            self.motor_temperature_c = float(value) / 10.0
+        else:
+            return
+        self._render_temperature_text()
+        self._render_can_feedback()
+
+    def _render_temperature_text(self) -> None:
+        language = self.language_var.get()
+
+        def shown(value: float | None) -> str:
+            if value is None:
+                return tr(language, "temperature_unknown")
+            return f"~{value:.1f} °C"
+
+        self.temperature_var.set(
+            tr(
+                language,
+                "temperature_summary",
+                board=shown(self.board_temperature_c),
+                motor=shown(self.motor_temperature_c),
+            )
+        )
+
+    def _render_can_feedback(self) -> None:
+        feedback = self._last_can_feedback
+        if feedback is None:
+            return
+
+        def shown(value: float | None) -> str:
+            return "unknown" if value is None else f"~{value:.1f} °C"
+
+        self.can_feedback_var.set(
+            f"CAN Type 2: mode={feedback.mode} faults=0x{feedback.faults:02X} "
+            f"pos={feedback.position_rad:.4f} rad vel={feedback.velocity_rad_s:.4f} rad/s "
+            f"torque={feedback.torque_nm:.4f} Nm | "
+            f"board={shown(self.board_temperature_c)} "
+            f"motor={shown(self.motor_temperature_c)}"
+        )
+
+    def _temperature_poll_tick(self) -> None:
+        try:
+            transport = self.can_transport
+            if (
+                self.connected
+                and self.active_interface == "can"
+                and transport is not None
+                and self.can_uid is not None
+                and not self.can_parameter_panel.long_run.running
+                and not self.start_waiting
+                and not self.stop_pending
+            ):
+                indices = (0x3005, 0x3006)
+                index = indices[self._temperature_poll_index % len(indices)]
+                self._temperature_poll_index += 1
+                transport.send(build_parameter_read(index))
+        except (OSError, RuntimeError, ValueError, serial.SerialException) as exc:
+            self._append_log("error", f"CAN temperature read failed: {exc}\n", "can")
+        finally:
+            self.after(1000, self._temperature_poll_tick)
 
     def open_update_dialog(self) -> None:
         if self.update_dialog is not None:

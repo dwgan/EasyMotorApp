@@ -99,6 +99,16 @@ class CanProtocolTests(unittest.TestCase):
         self.assertEqual(index, 0x701E)
         self.assertEqual(value, 30.0)
 
+    def test_official_temperature_parameters_are_signed_deci_celsius(self):
+        frame = CanFrame(
+            make_id(17, 0x007F, 0xFD),
+            bytes.fromhex("05 30 00 00 FB FF 00 00"),
+        )
+        index, value = parse_parameter_response(frame)
+        self.assertEqual(index, 0x3005)
+        self.assertEqual(value, -5)
+        self.assertEqual(build_parameter_read(0x3006).data[:2], bytes.fromhex("06 30"))
+
     def test_device_response_uid_is_little_endian(self):
         frame = CanFrame(
             make_id(0, 0x007F, 0xFE),

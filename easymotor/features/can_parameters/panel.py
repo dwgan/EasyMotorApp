@@ -40,6 +40,7 @@ class CanParameterPanel(ttk.Frame):
         idle_getter: Callable[[], bool],
         log_callback: Callable[[str, str], None],
         state_callback: Callable[[], None],
+        value_callback: Callable[[int, int | float], None] | None = None,
         node_id: int = 0x7F,
         host_id: int = 0xFD,
     ) -> None:
@@ -51,6 +52,7 @@ class CanParameterPanel(ttk.Frame):
         self._idle_getter = idle_getter
         self._log = log_callback
         self._state_changed = state_callback
+        self._value_callback = value_callback
         self.node_id = node_id
         self.host_id = host_id
         self.pending_verification: dict[int, int | float] = {}
@@ -445,6 +447,9 @@ class CanParameterPanel(ttk.Frame):
         if result is None:
             return False
         index, value = result
+        value_callback = getattr(self, "_value_callback", None)
+        if value_callback is not None:
+            value_callback(index, value)
         parameter = PARAMETER_BY_INDEX[index]
         shown = f"{value:.7g}" if isinstance(value, float) else str(value)
         if self.long_run.accept_response(

@@ -74,6 +74,8 @@ class FaultReport:
 
 
 PARAMETERS: Final = (
+    Parameter(0x3005, "mcuTemp", "int16"),
+    Parameter(0x3006, "motorTemp", "int16"),
     Parameter(0x7005, "run_mode", "uint8", True, allowed_values=(0,)),
     Parameter(0x7006, "iq_ref", "float"),
     Parameter(0x700A, "spd_ref", "float"),
@@ -250,7 +252,13 @@ def validate_safe_write(parameter: Parameter, value: int | float) -> None:
 
 
 def pack_value(kind: str, value: int | float) -> bytes:
-    formats = {"uint8": "<B3x", "uint16": "<H2x", "uint32": "<I", "float": "<f"}
+    formats = {
+        "uint8": "<B3x",
+        "uint16": "<H2x",
+        "int16": "<h2x",
+        "uint32": "<I",
+        "float": "<f",
+    }
     try:
         return struct.pack(formats[kind], value)
     except KeyError as exc:
@@ -262,8 +270,14 @@ def pack_value(kind: str, value: int | float) -> bytes:
 def unpack_value(kind: str, raw: bytes) -> int | float:
     if len(raw) != 4:
         raise ValueError("parameter value field must contain 4 bytes")
-    formats = {"uint8": "<B", "uint16": "<H", "uint32": "<I", "float": "<f"}
-    sizes = {"uint8": 1, "uint16": 2, "uint32": 4, "float": 4}
+    formats = {
+        "uint8": "<B",
+        "uint16": "<H",
+        "int16": "<h",
+        "uint32": "<I",
+        "float": "<f",
+    }
+    sizes = {"uint8": 1, "uint16": 2, "int16": 2, "uint32": 4, "float": 4}
     try:
         return struct.unpack(formats[kind], raw[: sizes[kind]])[0]
     except KeyError as exc:

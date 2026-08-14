@@ -25,6 +25,8 @@ class CanParameterPanelRoutingTests(unittest.TestCase):
         logs = []
         panel._log = lambda level, text: logs.append((level, text))
         panel._state_changed = lambda: None
+        values = []
+        panel._value_callback = lambda index, value: values.append((index, value))
 
         frame = CanFrame(
             make_id(17, 0x007F, 0xFD),
@@ -34,6 +36,7 @@ class CanParameterPanelRoutingTests(unittest.TestCase):
         self.assertTrue(panel.handle_frame(frame))
         self.assertIn("0x7019 mechPos", panel.last_value_var.value)
         self.assertTrue(any("mechPos" in text for _level, text in logs))
+        self.assertEqual(values, [(0x7019, 0.5)])
 
     def test_non_parameter_frame_is_not_consumed(self):
         panel = object.__new__(CanParameterPanel)
