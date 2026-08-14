@@ -17,6 +17,12 @@ _HAN_RE = re.compile(r"[\u3400-\u9fff]")
 # text should use ``tr`` keys; this map keeps legacy diagnostics bilingual
 # without altering protocol tokens, numeric values, or raw firmware frames.
 _EXACT_EN: Final = {
+    "实时健康状态": "Real-time Health",
+    "运动快照（只读）": "Motion Snapshot (Read-only)",
+    "编码器状态": "Encoder Status",
+    "显示原始诊断详情": "Show Raw Diagnostic Details",
+    "隐藏原始诊断详情": "Hide Raw Diagnostic Details",
+    "原始诊断详情": "Raw Diagnostic Details",
     "总览": "Overview",
     "CAN 控制": "CAN Control",
     "RS485 调试": "RS485 Debug",
@@ -458,6 +464,7 @@ _TEXT: Final = {
         "motor_status": "Motor status",
         "temperature_summary": "Estimated temperature | Controller board: {board} | Motor: {motor}",
         "temperature_unknown": "unknown",
+        "can_connection_summary": "{port} | CAN bus: 1 Mbps | Adapter link: {baud} baud",
         "demo_control": "Demo control",
         "choose_speed": "Choose demo speed",
         "speed_low": "Low 5 rpm",
@@ -551,6 +558,7 @@ _TEXT: Final = {
         "motor_status": "电机状态",
         "temperature_summary": "估算温度 | 控制板：{board} | 电机：{motor}",
         "temperature_unknown": "未知",
+        "can_connection_summary": "{port} | CAN 总线：1 Mbps | 适配器串口：{baud} baud",
         "demo_control": "演示控制",
         "choose_speed": "选择演示速度",
         "speed_low": "低速 5 rpm",

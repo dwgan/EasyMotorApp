@@ -142,6 +142,28 @@ class AppModeInterfaceTests(unittest.TestCase):
         self.assertIn("command=self.stop_motor", can_source)
         self.assertNotIn("command=self.open_wave_popup", can_source)
 
+    def test_can_feedback_does_not_duplicate_temperature_or_refresh_state(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+        motion_start = source.index("can_motion = ttk.LabelFrame(")
+        feedback_start = source.index("can_feedback = ttk.LabelFrame(", motion_start)
+        parameter_start = source.index("parameter_frame = ttk.LabelFrame(", feedback_start)
+
+        self.assertIn("textvariable=self.command_refresh_var", source[motion_start:feedback_start])
+        self.assertNotIn(
+            "textvariable=self.command_refresh_var",
+            source[feedback_start:parameter_start],
+        )
+        render_start = source.index("    def _render_can_feedback(")
+        render_end = source.index("    def _temperature_poll_tick(", render_start)
+        render_source = source[render_start:render_end]
+        self.assertNotIn("board_temperature_c", render_source)
+        self.assertNotIn("motor_temperature_c", render_source)
+
+    def test_rs485_raw_diagnostics_are_collapsed_by_default(self):
+        app = object.__new__(EasyMotorApp)
+        app.rs485_details_visible = False
+        self.assertFalse(app.rs485_details_visible)
+
     def test_engineer_can_run_reuses_demo_safety_service(self):
         app = object.__new__(EasyMotorApp)
         app.engineer_can_speed_var = _InterfaceSelection(10)

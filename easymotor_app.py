@@ -152,6 +152,12 @@ ENGINEER_TEXT_EN = {
     "RS485 状态": "RS485 Status",
     "波形窗口": "Waveform",
     "RS485 Debug 运动与 PWM 遥测": "RS485 Debug Motion and PWM Telemetry",
+    "实时健康状态": "Real-time Health",
+    "运动快照（只读）": "Motion Snapshot (Read-only)",
+    "编码器状态": "Encoder Status",
+    "显示原始诊断详情": "Show Raw Diagnostic Details",
+    "隐藏原始诊断详情": "Hide Raw Diagnostic Details",
+    "原始诊断详情": "Raw Diagnostic Details",
     "RS485 Debug 电流波形": "RS485 Debug Current Waveform",
     "停止": "STOP",
     "收发日志": "Communication Log",
@@ -438,6 +444,7 @@ class EasyMotorApp(tk.Tk):
         self.torque_var = localized_var("TORQUE: 未知")
         self.command_refresh_var = localized_var("CAN command refresh: idle")
         self.command_refresh_count = 0
+        self.rs485_details_visible = False
         self.freq_var = localized_var("PWM/FOC: 未知")
         self._freq_pwm_hz: int | None = None
         self._freq_foc_hz: int | None = None
@@ -677,53 +684,68 @@ class EasyMotorApp(tk.Tk):
             textvariable=self.rs485_state_var,
             font=("Microsoft YaHei UI", 12),
         ).grid(row=0, column=0, sticky="w")
-        ttk.Label(state_frame, textvariable=self.torque_var).grid(
-            row=0, column=1, padx=(24, 0), sticky="w"
-        )
         ttk.Button(
             state_frame, text="RS485 状态", command=self._request_debug_status
         ).grid(row=1, column=0, padx=(0, 4), pady=(6, 0), sticky="w")
         state_frame.columnconfigure(3, weight=1)
 
+        health_frame = ttk.LabelFrame(
+            self.engineer_rs485_tab, text="实时健康状态", padding=10
+        )
+        health_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Label(health_frame, textvariable=self.cpu_load_var).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(health_frame, textvariable=self.health_var).grid(
+            row=1, column=0, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(health_frame, textvariable=self.temperature_var).grid(
+            row=2, column=0, sticky="w", pady=(4, 0)
+        )
+        health_frame.columnconfigure(0, weight=1)
+
         motion_frame = ttk.LabelFrame(
-            self.engineer_rs485_tab, text="RS485 Debug 运动与 PWM 遥测", padding=10
+            self.engineer_rs485_tab, text="运动快照（只读）", padding=10
         )
         motion_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Label(motion_frame, textvariable=self.motion_var).grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Label(motion_frame, textvariable=self.angle_var).grid(
+        ttk.Label(motion_frame, textvariable=self.speed_control_var).grid(
             row=1, column=0, sticky="w", pady=(4, 0)
         )
-        ttk.Label(motion_frame, textvariable=self.pwm_var).grid(
-            row=2, column=0, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(motion_frame, textvariable=self.speed_control_var).grid(
-            row=3, column=0, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(motion_frame, textvariable=self.health_var).grid(
-            row=4, column=0, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(motion_frame, textvariable=self.cpu_load_var).grid(
-            row=5, column=0, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(motion_frame, textvariable=self.encoder_models_var).grid(
-            row=6, column=0, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(motion_frame, textvariable=self.temperature_var).grid(
-            row=7, column=0, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(motion_frame, textvariable=self.eangle_var).grid(
-            row=8, column=0, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(motion_frame, textvariable=self.freq_var).grid(
-            row=9, column=0, sticky="w", pady=(4, 0)
-        )
         motion_frame.columnconfigure(0, weight=1)
+
+        encoder_frame = ttk.LabelFrame(
+            self.engineer_rs485_tab, text="编码器状态", padding=10
+        )
+        encoder_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Label(encoder_frame, textvariable=self.encoder_models_var).grid(
+            row=0, column=0, sticky="w"
+        )
+        encoder_frame.columnconfigure(0, weight=1)
+
+        self.rs485_details_button = ttk.Button(
+            self.engineer_rs485_tab,
+            text="显示原始诊断详情",
+            command=self._toggle_rs485_details,
+        )
+        self.rs485_details_button.pack(anchor="w", padx=8, pady=(0, 8))
+        self.rs485_details_frame = ttk.LabelFrame(
+            self.engineer_rs485_tab, text="原始诊断详情", padding=10
+        )
+        for row, variable in enumerate(
+            (self.torque_var, self.angle_var, self.pwm_var, self.eangle_var, self.freq_var)
+        ):
+            ttk.Label(self.rs485_details_frame, textvariable=variable).grid(
+                row=row, column=0, sticky="w", pady=((0 if row == 0 else 4), 0)
+            )
+        self.rs485_details_frame.columnconfigure(0, weight=1)
 
         waveform_frame = ttk.LabelFrame(
             self.engineer_rs485_tab, text="RS485 Debug 电流波形", padding=10
         )
+        self.rs485_waveform_frame = waveform_frame
         waveform_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Button(
             waveform_frame, text="波形窗口", command=self.open_wave_popup
@@ -782,6 +804,9 @@ class EasyMotorApp(tk.Tk):
             text="未勾选时单次运行 5 秒；控制仍受 CAN 看门狗和固件安全门限保护。",
             foreground=WARNING_TEXT,
         ).grid(row=2, column=4, columnspan=3, sticky="w", padx=(18, 0), pady=(8, 0))
+        ttk.Label(can_motion, textvariable=self.command_refresh_var).grid(
+            row=3, column=0, columnspan=7, sticky="w", pady=(8, 0)
+        )
         can_motion.columnconfigure(7, weight=1)
 
         can_feedback = ttk.LabelFrame(
@@ -790,9 +815,6 @@ class EasyMotorApp(tk.Tk):
         can_feedback.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Label(can_feedback, textvariable=self.can_feedback_var).pack(anchor="w")
         ttk.Label(can_feedback, textvariable=self.temperature_var).pack(
-            anchor="w", pady=(6, 0)
-        )
-        ttk.Label(can_feedback, textvariable=self.command_refresh_var).pack(
             anchor="w", pady=(6, 0)
         )
 
@@ -925,6 +947,40 @@ class EasyMotorApp(tk.Tk):
 
     def _ui(self, text: object) -> str:
         return localize_legacy(text, self.language_var.get())
+
+    def _toggle_rs485_details(self) -> None:
+        self.rs485_details_visible = not self.rs485_details_visible
+        if self.rs485_details_visible:
+            self.rs485_details_frame.pack(
+                fill=tk.X,
+                padx=8,
+                pady=(0, 8),
+                before=self.rs485_waveform_frame,
+            )
+            source = "隐藏原始诊断详情"
+        else:
+            self.rs485_details_frame.pack_forget()
+            source = "显示原始诊断详情"
+        self.rs485_details_button._easymotor_source_text = source
+        self.rs485_details_button.configure(
+            text=ENGINEER_TEXT_EN.get(source, source)
+            if self.language_var.get() == "en"
+            else source
+        )
+
+    def _render_can_connection_text(self) -> None:
+        if not self.connected or self.active_interface != "can":
+            self.connection_var.set(tr(self.language_var.get(), "not_connected"))
+            return
+        port = self.port_var.get()
+        self.connection_var.set(
+            tr(
+                self.language_var.get(),
+                "can_connection_summary",
+                port=port,
+                baud=f"{USB_CAN_BAUD:,}",
+            )
+        )
 
     def _refresh_localized_vars(self) -> None:
         for value in vars(self).values():
@@ -1103,13 +1159,7 @@ class EasyMotorApp(tk.Tk):
         self.encoder_models_var.set(self._format_encoder_models())
         self._render_temperature_text()
         self._render_can_feedback()
-        self.connection_var.set(
-            (
-                f"{self.port_var.get()} | {self.active_interface.upper()}"
-                if self.connected and self.active_interface
-                else tr(self.language_var.get(), "not_connected")
-            )
-        )
+        self._render_can_connection_text()
         if self.serial_port is None:
             self.debug_connection_var.set(tr(self.language_var.get(), "not_connected"))
         self.demo_view.rebuild()
@@ -1363,7 +1413,7 @@ class EasyMotorApp(tk.Tk):
         self.can_enumeration_generation += 1
         generation = self.can_enumeration_generation
         self.can_enumeration_guidance_shown = False
-        self.connection_var.set(f"{port} | CAN 1 Mbps / USB {USB_CAN_BAUD:,}")
+        self._render_can_connection_text()
         self._append_log("event", f"EasyMotor CAN connected {port} @ {USB_CAN_BAUD}\n")
         self._append_log(
             "event",
@@ -3058,15 +3108,10 @@ class EasyMotorApp(tk.Tk):
         if feedback is None:
             return
 
-        def shown(value: float | None) -> str:
-            return "unknown" if value is None else f"~{value:.1f} °C"
-
         self.can_feedback_var.set(
             f"CAN Type 2: mode={feedback.mode} faults=0x{feedback.faults:02X} "
             f"pos={feedback.position_rad:.4f} rad vel={feedback.velocity_rad_s:.4f} rad/s "
-            f"torque={feedback.torque_nm:.4f} Nm | "
-            f"board={shown(self.board_temperature_c)} "
-            f"motor={shown(self.motor_temperature_c)}"
+            f"torque={feedback.torque_nm:.4f} Nm"
         )
 
     def _temperature_poll_tick(self) -> None:
