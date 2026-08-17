@@ -164,6 +164,7 @@ ENGINEER_TEXT_EN = {
     "停止": "STOP",
     "收发日志": "Communication Log",
     "独立日志窗口": "Open log window",
+    "清空日志": "Clear logs",
     "波形流期间日志与波形并行显示；可导出为文本文件。": "Logs remain available during waveform streaming and can be exported.",
     "开始波形": "Start waveform",
     "停止波形": "Stop waveform",
@@ -866,10 +867,13 @@ class EasyMotorApp(tk.Tk):
         ttk.Button(
             log_tools, text="独立日志窗口", command=self.open_log_popup
         ).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(
+            log_tools, text="清空日志", command=self.clear_log
+        ).grid(row=0, column=1, padx=(0, 8))
         ttk.Label(
             log_tools, text="波形流期间日志与波形并行显示；可导出为文本文件。"
-        ).grid(row=0, column=1, sticky="w")
-        log_tools.columnconfigure(2, weight=1)
+        ).grid(row=0, column=2, sticky="w")
+        log_tools.columnconfigure(3, weight=1)
         self.log_notebook = ttk.Notebook(log_frame)
         self.log_notebook.grid(row=1, column=0, columnspan=2, sticky="nsew")
         self.log_widgets: dict[str, tk.Text] = {}

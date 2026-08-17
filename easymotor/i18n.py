@@ -200,6 +200,7 @@ _EXACT_EN: Final = {
     "包络模式(减带宽)": "Envelope mode",
     "保存波形": "Save Waveform",
     "导出日志": "Export Log",
+    "清空日志": "Clear logs",
     "独立收发日志": "Communication Log",
     "收发日志 (独立显示)": "Communication Log",
     "缺少 pyserial。请执行: python -m pip install -r requirements.txt": "pyserial is missing. Run: python -m pip install -r requirements.txt",
