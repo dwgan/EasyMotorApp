@@ -882,6 +882,7 @@ class EasyMotorApp(tk.Tk):
             ("can", "CAN", "CAN"),
             ("rs485", "RS485 Debug", "RS485 Debug"),
             ("app", "应用", "Application"),
+            ("operation", "操作", "Operation"),
         )
         self._log_tabs: dict[str, ttk.Frame] = {}
         for channel, chinese, _english in self._log_tab_titles:
@@ -1447,6 +1448,7 @@ class EasyMotorApp(tk.Tk):
         self.can_enumeration_probe_index = 0
         self._render_can_connection_text()
         self._append_log("event", f"EasyMotor CAN connected {port} @ {USB_CAN_BAUD}\n")
+        self._operation_log("event", f"CAN connected {port}.\n")
         self._append_log(
             "event",
             "Waiting for CAN motor power; device discovery will retry automatically.\n",
@@ -1546,6 +1548,7 @@ class EasyMotorApp(tk.Tk):
         self.command_refresh_var.set("CAN command refresh: idle")
         self._update_control_state()
         self._append_log("event", "CAN motion connection disconnected\n")
+        self._operation_log("event", "CAN disconnected.\n")
 
     def _disconnect_debug(self) -> None:
         connection = self.serial_port
@@ -2797,8 +2800,10 @@ class EasyMotorApp(tk.Tk):
             except (serial.SerialException, OSError, RuntimeError):
                 pass
             self._append_log("error", f"CAN enable failed: {exc}\n")
+            self._operation_log("error", f"Enable failed: {exc}\n")
             return False
         self._append_log("event", "CAN Type 3 enable sent; waiting for Type 2 MOTOR feedback.\n")
+        self._operation_log("event", "Enable requested.\n")
         self.start_waiting = True
         start_time = time.monotonic()
         # Ignore an old idle Type 2 frame when evaluating the new enable
@@ -2824,11 +2829,13 @@ class EasyMotorApp(tk.Tk):
             self.start_waiting = False
             self.demo_service.cancel()
             self._append_log("error", "CAN feedback lost during enable/alignment; requesting stop.\n")
+            self._operation_log("error", "Enable feedback timeout; stopping.\n")
             self.stop_motor()
             return
         if self.mci_state == 6:
             self.start_waiting = False
             self._append_log("event", "MCU 已进入 RUN，可以施加 Iq/速度。\n")
+            self._operation_log("event", "Entered RUN.\n")
             demo_action = self.demo_service.motor_ready()
             if demo_action is not None:
                 self._execute_demo_action(demo_action)
@@ -2838,6 +2845,7 @@ class EasyMotorApp(tk.Tk):
             self.start_waiting = False
             self.demo_service.cancel()
             self._append_log("error", "等待 RUN 超时，请检查状态和故障。\n")
+            self._operation_log("error", "Enable timed out waiting for RUN.\n")
             self._update_control_state()
             return
 
@@ -2941,6 +2949,7 @@ class EasyMotorApp(tk.Tk):
             "RS04 Type 6 sent; waiting for zero-position Type 2 feedback.\n",
             "can",
         )
+        self._operation_log("event", "Zero requested.\n")
 
     def _mit_send_once(self, command: MitCommand) -> None:
         transport = self.can_transport
@@ -2949,6 +2958,7 @@ class EasyMotorApp(tk.Tk):
         transport.command_mit(command)
         self.motion_command_active = True
         self._append_log("tx", f"MIT command once: {command}\n", "can")
+        self._operation_log("tx", f"MIT single command: {command}\n")
         # A single frame is intentionally a bounded bench pulse, not a hidden
         # hold mode.  If the caller does not immediately start the 100 Hz
         # refresher, stop before the firmware watchdog has to intervene.
@@ -2971,6 +2981,7 @@ class EasyMotorApp(tk.Tk):
             "MIT hold started at 100 Hz; firmware watchdog is 250 ms.\n",
             "can",
         )
+        self._operation_log("event", f"MIT hold started: {command}\n")
 
     def _mit_set_node_id(self, node_id: int) -> None:
         transport = self.can_transport
@@ -2983,6 +2994,7 @@ class EasyMotorApp(tk.Tk):
         self._append_log(
             "event", f"RS04 Type 7 requested node ID {old_id} -> {node_id}.\n", "can"
         )
+        self._operation_log("event", f"Set node ID {old_id} -> {node_id}.\n")
 
     def _mit_save_configuration(self) -> None:
         transport = self.can_transport
@@ -2994,6 +3006,7 @@ class EasyMotorApp(tk.Tk):
         self._append_log(
             "event", "RS04 Type 22 configuration save requested.\n", "can"
         )
+        self._operation_log("event", "Save configuration requested.\n")
 
     def stop_motor(self) -> None:
         self.can_command_refresher.stop()
@@ -3009,6 +3022,7 @@ class EasyMotorApp(tk.Tk):
         self.stop_pending = True
         self.stop_attempts = 0
         self.can_stop_not_before = time.monotonic() + 0.3
+        self._operation_log("event", "Stop requested.\n")
         self._send_stop_attempt()
 
     def _send_stop_attempt(self) -> None:
@@ -3021,6 +3035,7 @@ class EasyMotorApp(tk.Tk):
                 self.can_command_rpm = 0
             except (serial.SerialException, OSError, RuntimeError) as exc:
                 self._append_log("error", f"CAN stop failed: {exc}\n")
+                self._operation_log("error", f"Stop send failed: {exc}\n")
         self.after(STOP_RETRY_INTERVAL_MS, self._stop_retry_tick)
 
     def _stop_retry_tick(self) -> None:
@@ -3029,17 +3044,20 @@ class EasyMotorApp(tk.Tk):
         if self.mci_state == 0 and time.monotonic() >= self.can_stop_not_before:
             self.stop_pending = False
             self._append_log("event", "已确认 MCI 进入 IDLE。\n")
+            self._operation_log("event", "Stop confirmed; IDLE.\n")
             return
         if self.stop_attempts < STOP_MAX_ATTEMPTS:
             self._append_log(
                 "event", f"未收到 Stop 确认，第{self.stop_attempts + 1}次发送。\n"
             )
+            self._operation_log("event", f"Stop retry {self.stop_attempts}.\n")
             self._send_stop_attempt()
             return
         self.stop_pending = False
         self._append_log(
             "error", "CAN Stop 未获得确认；停止命令刷新，等待 MCU 看门狗停机。\n"
         )
+        self._operation_log("error", "Stop not confirmed.\n")
 
     def _update_control_state(self) -> None:
         self._render_demo_view()
@@ -3057,7 +3075,7 @@ class EasyMotorApp(tk.Tk):
 
     def _append_log(self, tag: str, text: str, channel: str | None = None) -> None:
         channel = channel or self._active_log_channel
-        if channel not in {"can", "rs485", "app"}:
+        if channel not in {"can", "rs485", "app", "operation"}:
             channel = "app"
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self._log_entries.append((channel, tag, timestamp, text))
@@ -3070,6 +3088,9 @@ class EasyMotorApp(tk.Tk):
             except tk.TclError:
                 self.log_popup_text = None
                 self.log_popup = None
+
+    def _operation_log(self, tag: str, text: str) -> None:
+        self._append_log(tag, text, "operation")
 
     def _rerender_logs(self) -> None:
         for channel, widget in self.log_widgets.items():

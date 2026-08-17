@@ -39,7 +39,7 @@ class CanProtocolTests(unittest.TestCase):
         frame = build_velocity_control(10)
         self.assertEqual(frame.arbitration_id, 0x0180007F)
         self.assertEqual(frame.data[0:2], bytes.fromhex("80 00"))
-        self.assertEqual(frame.data[2:4], bytes.fromhex("80 4C"))
+        self.assertEqual(frame.data[2:4], bytes.fromhex("80 7F"))
         self.assertEqual(frame.data[4:8], bytes(4))
 
     def test_openarmx_mit_golden_vector(self):
@@ -52,14 +52,14 @@ class CanProtocolTests(unittest.TestCase):
         )
         frame = build_mit_control(command, node_id=1)
         self.assertEqual(frame.arbitration_id, 0x01800001)
-        self.assertEqual(frame.data, bytes.fromhex("80 34 80 41 00 83 02 8F"))
+        self.assertEqual(frame.data, bytes.fromhex("80 34 80 6D 05 1F 33 33"))
 
     def test_mit_safety_envelope_rejects_invalid_values(self):
         invalid = (
             MitCommand(position_rad=float("nan")),
-            MitCommand(velocity_rad_s=0.51),
-            MitCommand(kp=10.01),
-            MitCommand(kd=1.01),
+            MitCommand(velocity_rad_s=30.01),
+            MitCommand(kp=500.01),
+            MitCommand(kd=5.01),
             MitCommand(torque_nm=0.01),
         )
         for command in invalid:
@@ -111,6 +111,10 @@ class CanProtocolTests(unittest.TestCase):
         arbitration_id = make_id(18, 0x00FD, 0x01)
         self.assertEqual(arbitration_id, 0x1200FD01)
         self.assertEqual(split_id(arbitration_id), (18, 0x00FD, 0x01))
+
+    def test_broadcast_target_id_is_supported(self):
+        self.assertEqual(make_id(3, 0x00FD, 0xFE), 0x0300FDFE)
+        self.assertEqual(split_id(0x0300FDFE), (3, 0x00FD, 0xFE))
 
     def test_official_type18_usb_can_example(self):
         frame = CanFrame(0x1200FD01, bytes.fromhex("05 70 00 00 01 00 00 00"))
