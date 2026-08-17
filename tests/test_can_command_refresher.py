@@ -4,6 +4,7 @@ import time
 import unittest
 
 from easymotor.services.can_command_refresher import CanCommandRefresher
+from easymotor.protocols.can_motor import MitCommand
 
 
 class FakeTransport:
@@ -11,6 +12,7 @@ class FakeTransport:
         self.last_feedback_time = time.monotonic()
         self.last_feedback_mode = 2
         self.commands = []
+        self.mit_commands = []
         self.stop_count = 0
         self.lock = threading.Lock()
 
@@ -21,6 +23,10 @@ class FakeTransport:
     def stop(self):
         with self.lock:
             self.stop_count += 1
+
+    def command_mit(self, command):
+        with self.lock:
+            self.mit_commands.append(command)
 
 
 class CanCommandRefresherTests(unittest.TestCase):
@@ -59,6 +65,24 @@ class CanCommandRefresherTests(unittest.TestCase):
                     pass
             self.assertIn("can_refresh_timeout", kinds)
             self.assertEqual(transport.stop_count, 1)
+        finally:
+            refresher.close()
+
+    def test_mit_refresh_uses_same_deadline_worker(self):
+        events = queue.Queue()
+        transport = FakeTransport()
+        refresher = CanCommandRefresher(
+            events, interval_s=0.01, feedback_timeout_s=0.2
+        )
+        command = MitCommand(position_rad=0.02, kp=1.0, kd=0.1)
+        try:
+            refresher.start_mit(transport, command)
+            deadline = time.monotonic() + 0.2
+            while len(transport.mit_commands) < 3 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            refresher.stop()
+            self.assertGreaterEqual(len(transport.mit_commands), 3)
+            self.assertTrue(all(item == command for item in transport.mit_commands))
         finally:
             refresher.close()
 

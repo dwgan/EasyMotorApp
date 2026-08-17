@@ -8,6 +8,7 @@ import time
 from typing import Protocol
 
 from easymotor.protocols.can_motor import MODE_MOTOR
+from easymotor.protocols.can_motor import MitCommand
 
 
 class CanVelocityTransport(Protocol):
@@ -18,6 +19,8 @@ class CanVelocityTransport(Protocol):
     def last_feedback_mode(self) -> int | None: ...
 
     def command_velocity(self, motor_rpm: int) -> None: ...
+
+    def command_mit(self, command: MitCommand) -> None: ...
 
     def stop(self) -> None: ...
 
@@ -45,6 +48,7 @@ class CanCommandRefresher:
         self._enabled = False
         self._transport: CanVelocityTransport | None = None
         self._rpm = 0
+        self._mit_command: MitCommand | None = None
         self._deadline: float | None = None
         self._started_at = 0.0
         self._sent_count = 0
@@ -66,7 +70,24 @@ class CanCommandRefresher:
         with self._condition:
             self._transport = transport
             self._rpm = motor_rpm
+            self._mit_command = None
             self._deadline = deadline
+            self._started_at = time.monotonic()
+            self._sent_count = 0
+            self._enabled = True
+            self._generation += 1
+            self._condition.notify_all()
+
+    def start_mit(
+        self,
+        transport: CanVelocityTransport,
+        command: MitCommand,
+    ) -> None:
+        """Refresh a full Type-1 MIT command at the configured deadline."""
+        with self._condition:
+            self._transport = transport
+            self._mit_command = command
+            self._deadline = None
             self._started_at = time.monotonic()
             self._sent_count = 0
             self._enabled = True
@@ -77,6 +98,7 @@ class CanCommandRefresher:
         with self._condition:
             self._enabled = False
             self._transport = None
+            self._mit_command = None
             self._deadline = None
             self._generation += 1
             self._condition.notify_all()
@@ -85,6 +107,7 @@ class CanCommandRefresher:
         with self._condition:
             self._enabled = False
             self._transport = None
+            self._mit_command = None
             self._shutdown = True
             self._generation += 1
             self._condition.notify_all()
@@ -94,6 +117,7 @@ class CanCommandRefresher:
     def _disable_locked(self) -> None:
         self._enabled = False
         self._transport = None
+        self._mit_command = None
         self._deadline = None
         self._generation += 1
 
@@ -154,7 +178,10 @@ class CanCommandRefresher:
                     # Keep the condition locked across the physical write.  A
                     # simultaneous stop() therefore completes after this frame
                     # and can safely put Type 4 last on the wire.
-                    transport.command_velocity(self._rpm)
+                    if self._mit_command is None:
+                        transport.command_velocity(self._rpm)
+                    else:
+                        transport.command_mit(self._mit_command)
                 except Exception as exc:
                     self._disable_locked()
                     self._events.put(("can_refresh_error", str(exc)))

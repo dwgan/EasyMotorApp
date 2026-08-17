@@ -113,6 +113,13 @@ CAN 帧、RS485 串口遥测和软件生命周期事件不再混在单一列表�
 - `transports/usb_can.py`：官方 USB-CAN 串口传输；
 - `features/demo/view.py`：默认演示页面；
 - `features/can_parameters/panel.py`：复用主 CAN transport 的嵌入式参数面板。
+- `features/mit_bench/panel.py`：OpenArmX/RS04 Type 1 的低能量 MIT 台架工具。
+
+高级模式的 `CAN Control` 页提供独立 MIT Bench Test。它支持节点 1/2、
+本次上电置零、使能/停止、五参数 Type 1 单次发送与 100 Hz 保持，以及 Type 2
+实时反馈。初始限制为 Kp 10、Kd 1、相邻目标 0.05 rad、速度 0.5 rad/s；完成
+实测力矩标定前前馈力矩固定为零。单次发送在 200 ms 内主动停止，持续保持则由
+100 Hz 刷新维持，固件 250 ms 看门狗仍是独立安全兜底。
 
 通用 Python 文件名不使用具体电机型号；实际兼容的 RS04 协议仍在界面和协议说明中明确标注。
 完整的模式边界、统一控制链和后续拆分顺序见 `docs/APP_ARCHITECTURE.md`。

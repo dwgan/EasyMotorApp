@@ -4,13 +4,18 @@ from easymotor.protocols.can_motor import (
     AtFrameDecoder,
     CanFrame,
     MODE_MOTOR,
+    MitCommand,
     build_active_report,
     build_device_id_request,
     build_enable,
     build_parameter_read,
     build_parameter_write,
+    build_mit_control,
     build_rejection_probe,
     build_stop,
+    build_save,
+    build_set_node_id,
+    build_set_zero,
     build_velocity_control,
     encode_at_frame,
     make_id,
@@ -37,6 +42,49 @@ class CanProtocolTests(unittest.TestCase):
         self.assertEqual(frame.data[2:4], bytes.fromhex("80 4C"))
         self.assertEqual(frame.data[4:8], bytes(4))
 
+    def test_openarmx_mit_golden_vector(self):
+        command = MitCommand(
+            position_rad=0.02,
+            velocity_rad_s=0.1,
+            kp=10.0,
+            kd=1.0,
+            torque_nm=0.0,
+        )
+        frame = build_mit_control(command, node_id=1)
+        self.assertEqual(frame.arbitration_id, 0x01800001)
+        self.assertEqual(frame.data, bytes.fromhex("80 34 80 41 00 83 02 8F"))
+
+    def test_mit_safety_envelope_rejects_invalid_values(self):
+        invalid = (
+            MitCommand(position_rad=float("nan")),
+            MitCommand(velocity_rad_s=0.51),
+            MitCommand(kp=10.01),
+            MitCommand(kd=1.01),
+            MitCommand(torque_nm=0.01),
+        )
+        for command in invalid:
+            with self.subTest(command=command):
+                with self.assertRaises(ValueError):
+                    build_mit_control(command, node_id=1)
+
+    def test_zero_id_and_save_frames_match_rs04_layout(self):
+        self.assertEqual(
+            build_set_zero(node_id=1),
+            CanFrame(0x0600FD01, bytes.fromhex("01 00 00 00 00 00 00 00")),
+        )
+        self.assertEqual(build_set_node_id(2, node_id=1).arbitration_id, 0x0702FD01)
+        self.assertEqual(build_save(node_id=2), CanFrame(0x1600FD02, bytes(8)))
+
+    def test_torque_calibration_parameters_use_bounded_safe_writes(self):
+        positive = build_parameter_write(0x7030, 0.009, node_id=1)
+        negative = build_parameter_write(0x7031, 0.010, node_id=1)
+        calibrated = build_parameter_write(0x7032, 1, node_id=1)
+        self.assertEqual(positive.data[:4], bytes.fromhex("30 70 00 00"))
+        self.assertEqual(negative.data[:4], bytes.fromhex("31 70 00 00"))
+        self.assertEqual(calibrated.data, bytes.fromhex("32 70 00 00 01 00 00 00"))
+        with self.assertRaises(ValueError):
+            build_parameter_write(0x7030, 0.101, node_id=1)
+
     def test_type1_rejects_speed_outside_demo_envelope(self):
         for value in (-21, 21, 5.0, True):
             with self.subTest(value=value):
@@ -57,6 +105,7 @@ class CanProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(feedback.temperature_c, 25.0)
         self.assertAlmostEqual(feedback.position_rad, 0.0, places=3)
         self.assertAlmostEqual(feedback.velocity_rad_s, 0.0, places=2)
+        self.assertEqual(feedback.torque_nm, 0.0)
 
     def test_id_fields_follow_official_29_bit_layout(self):
         arbitration_id = make_id(18, 0x00FD, 0x01)

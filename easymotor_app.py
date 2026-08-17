@@ -34,6 +34,7 @@ from easymotor.core.safety_policy import (
     DEMO_SPEED_PRESETS_RPM,
 )
 from easymotor.features.can_parameters import CanParameterPanel
+from easymotor.features.mit_bench import MitBenchPanel
 from easymotor.features.demo import DemoView
 from easymotor.features.update_dialog import UpdateDialog
 from easymotor.i18n import (
@@ -46,6 +47,7 @@ from easymotor.i18n import (
 from easymotor.models.telemetry import TelemetryModel
 from easymotor.protocols.can_motor import (
     CanFrame,
+    MitCommand,
     MODE_CALIBRATING,
     MODE_MOTOR,
     MODE_RESET,
@@ -388,6 +390,11 @@ class EasyMotorApp(tk.Tk):
             self.rx_queue,
             interval_s=COMMAND_REFRESH_INTERVAL_MS / 1000.0,
         )
+        self.mit_command_refresher = CanCommandRefresher(
+            self.rx_queue,
+            interval_s=0.01,
+            feedback_timeout_s=0.20,
+        )
         self.telemetry_model = TelemetryModel()
         self.wave_decoder = WaveFrameDecoder()
         self.reader_stop = threading.Event()
@@ -408,6 +415,7 @@ class EasyMotorApp(tk.Tk):
         self.can_enumeration_started = 0.0
         self.can_enumeration_generation = 0
         self.can_enumeration_guidance_shown = False
+        self.can_enumeration_probe_index = 0
         self.can_stop_not_before = 0.0
         self.mci_state: int | None = None
         self.start_waiting = False
@@ -818,6 +826,21 @@ class EasyMotorApp(tk.Tk):
             anchor="w", pady=(6, 0)
         )
 
+        self.mit_bench_panel = MitBenchPanel(
+            self.engineer_can_tab,
+            language_getter=self.language_var.get,
+            connected_getter=self._parameter_connection_ready,
+            feedback_getter=lambda: self._last_can_feedback,
+            set_zero=self._mit_set_zero,
+            enable=self.start_motor,
+            stop=self.stop_motor,
+            send_once=self._mit_send_once,
+            start_hold=self._mit_start_hold,
+            set_node_id=self._mit_set_node_id,
+            save_configuration=self._mit_save_configuration,
+        )
+        self.mit_bench_panel.pack(fill=tk.X, padx=8, pady=(0, 8))
+
         parameter_frame = ttk.LabelFrame(
             self.engineer_can_tab, text="CAN 参数", padding=10
         )
@@ -1186,6 +1209,7 @@ class EasyMotorApp(tk.Tk):
             except tk.TclError:
                 pass
         self.can_parameter_panel.refresh_language()
+        self.mit_bench_panel.refresh_language()
         if self.update_dialog is not None:
             try:
                 if self.update_dialog.winfo_exists():
@@ -1392,7 +1416,10 @@ class EasyMotorApp(tk.Tk):
         self.after(1200, verify_summary)
 
     def _connect_can(self, port: str) -> None:
-        transport = UsbCanMotorTransport(self.rx_queue)
+        initial_node_id = 0x7F
+        if hasattr(self, "mit_bench_panel"):
+            initial_node_id = self.mit_bench_panel.node_var.get()
+        transport = UsbCanMotorTransport(self.rx_queue, node_id=initial_node_id)
         try:
             transport.connect(port)
             transport.enumerate()
@@ -1413,6 +1440,7 @@ class EasyMotorApp(tk.Tk):
         self.can_enumeration_generation += 1
         generation = self.can_enumeration_generation
         self.can_enumeration_guidance_shown = False
+        self.can_enumeration_probe_index = 0
         self._render_can_connection_text()
         self._append_log("event", f"EasyMotor CAN connected {port} @ {USB_CAN_BAUD}\n")
         self._append_log(
@@ -1438,6 +1466,12 @@ class EasyMotorApp(tk.Tk):
         if transport is None:
             return
         try:
+            probe_ids = (getattr(transport, "node_id", 0x7F), 1, 2, 0x7F)
+            probe_index = self.__dict__.get("can_enumeration_probe_index", 0)
+            probe_id = probe_ids[probe_index % len(probe_ids)]
+            if hasattr(transport, "node_id"):
+                transport.node_id = probe_id
+            self.can_enumeration_probe_index = probe_index + 1
             transport.enumerate()
         except (serial.SerialException, OSError, RuntimeError) as exc:
             self._append_log("error", f"USB-CAN enumeration retry failed: {exc}\n")
@@ -1461,8 +1495,11 @@ class EasyMotorApp(tk.Tk):
     def _disconnect_can(self) -> None:
         activity_before_disconnect = self._motor_activity_active()
         self.can_command_refresher.stop()
+        self.mit_command_refresher.stop()
         if hasattr(self, "can_parameter_panel"):
             self.can_parameter_panel.on_disconnect()
+        if hasattr(self, "mit_bench_panel"):
+            self.mit_bench_panel.on_stop_or_disconnect()
         self.demo_service.cancel()
         self.demo_view.reset_continuous()
         can_transport = self.can_transport
@@ -1728,6 +1765,10 @@ class EasyMotorApp(tk.Tk):
             node_id, uid = device
             first_detection = self.can_uid is None
             self.can_uid = uid
+            if self.can_transport is not None:
+                self.can_transport.node_id = node_id
+            if hasattr(self, "mit_bench_panel") and node_id in (1, 2):
+                self.mit_bench_panel.node_var.set(node_id)
             if first_detection:
                 self.can_enumeration_generation += 1
                 self._append_log("event", f"CAN node {node_id} UID=0x{uid:016X}\n", "can")
@@ -1754,6 +1795,7 @@ class EasyMotorApp(tk.Tk):
             if feedback.temperature_c > 0.0 or self.motor_temperature_c is not None:
                 self.motor_temperature_c = feedback.temperature_c
             self._last_can_feedback = feedback
+            self.mit_bench_panel.update_feedback(feedback)
             self._render_temperature_text()
             now = time.monotonic()
             self.can_last_feedback_time = now
@@ -2883,14 +2925,83 @@ class EasyMotorApp(tk.Tk):
             return
         self.after(20, self._pulse_watchdog_tick)
 
+    def _mit_set_zero(self) -> None:
+        transport = self.can_transport
+        if transport is None or not self._parameter_connection_ready():
+            raise RuntimeError("CAN is not connected and enumerated")
+        if self.mci_state != 0 or self._motor_activity_active():
+            raise RuntimeError("motor must be IDLE before setting the joint zero")
+        transport.set_zero()
+        self._append_log(
+            "event",
+            "RS04 Type 6 sent; waiting for zero-position Type 2 feedback.\n",
+            "can",
+        )
+
+    def _mit_send_once(self, command: MitCommand) -> None:
+        transport = self.can_transport
+        if transport is None or self.mci_state != 6:
+            raise RuntimeError("enable the motor and wait for MOTOR feedback first")
+        transport.command_mit(command)
+        self.motion_command_active = True
+        self._append_log("tx", f"MIT command once: {command}\n", "can")
+        # A single frame is intentionally a bounded bench pulse, not a hidden
+        # hold mode.  If the caller does not immediately start the 100 Hz
+        # refresher, stop before the firmware watchdog has to intervene.
+        self.after(200, self._mit_finish_single_command)
+
+    def _mit_finish_single_command(self) -> None:
+        if self.motion_command_active and not self.continuous_active:
+            self.stop_motor()
+
+    def _mit_start_hold(self, command: MitCommand) -> None:
+        self._mit_send_once(command)
+        assert self.can_transport is not None
+        self.can_command_refresher.stop()
+        self.mit_command_refresher.start_mit(self.can_transport, command)
+        self.continuous_active = True
+        self.command_refresh_count = 0
+        self.command_refresh_var.set("MIT Type 1 refresh: 100 Hz")
+        self._append_log(
+            "event",
+            "MIT hold started at 100 Hz; firmware watchdog is 250 ms.\n",
+            "can",
+        )
+
+    def _mit_set_node_id(self, node_id: int) -> None:
+        transport = self.can_transport
+        if transport is None or not self._parameter_connection_ready():
+            raise RuntimeError("CAN is not connected and enumerated")
+        if self.mci_state != 0 or self._motor_activity_active():
+            raise RuntimeError("motor must be IDLE before changing its node ID")
+        old_id = transport.node_id
+        transport.set_node_id(node_id)
+        self._append_log(
+            "event", f"RS04 Type 7 requested node ID {old_id} -> {node_id}.\n", "can"
+        )
+
+    def _mit_save_configuration(self) -> None:
+        transport = self.can_transport
+        if transport is None or not self._parameter_connection_ready():
+            raise RuntimeError("CAN is not connected and enumerated")
+        if self.mci_state != 0 or self._motor_activity_active():
+            raise RuntimeError("motor must be IDLE before saving configuration")
+        transport.save_configuration()
+        self._append_log(
+            "event", "RS04 Type 22 configuration save requested.\n", "can"
+        )
+
     def stop_motor(self) -> None:
         self.can_command_refresher.stop()
+        self.mit_command_refresher.stop()
         self.demo_service.cancel()
         self.demo_view.reset_continuous()
         self.pulse_active = False
         self.continuous_active = False
         self.motion_command_active = False
         self.command_refresh_var.set("CAN command refresh: idle")
+        if hasattr(self, "mit_bench_panel"):
+            self.mit_bench_panel.on_stop_or_disconnect()
         self.stop_pending = True
         self.stop_attempts = 0
         self.can_stop_not_before = time.monotonic() + 0.3
@@ -3081,6 +3192,12 @@ class EasyMotorApp(tk.Tk):
             self.board_temperature_c = float(value) / 10.0
         elif index == 0x3006:
             self.motor_temperature_c = float(value) / 10.0
+        elif index == 0x7032:
+            self.mit_bench_panel.set_calibrated(bool(value))
+            return
+        elif index == 0x701A:
+            self.mit_bench_panel.set_measured_iq(float(value))
+            return
         else:
             return
         self._render_temperature_text()
@@ -3126,7 +3243,7 @@ class EasyMotorApp(tk.Tk):
                 and not self.start_waiting
                 and not self.stop_pending
             ):
-                indices = (0x3005, 0x3006)
+                indices = (0x3005, 0x3006, 0x7032, 0x701A)
                 index = indices[self._temperature_poll_index % len(indices)]
                 self._temperature_poll_index += 1
                 transport.send(build_parameter_read(index))
@@ -3194,6 +3311,7 @@ class EasyMotorApp(tk.Tk):
             self.update_dialog = None
         self.disconnect()
         self.can_command_refresher.close()
+        self.mit_command_refresher.close()
         self.quit()
         self.destroy()
 

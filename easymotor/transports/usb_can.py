@@ -15,10 +15,15 @@ from easymotor.protocols.can_motor import (
     build_active_report,
     build_device_id_request,
     build_enable,
+    build_mit_control,
+    build_save,
+    build_set_node_id,
+    build_set_zero,
     build_stop,
     build_velocity_control,
     encode_at_frame,
     parse_feedback,
+    MitCommand,
 )
 
 
@@ -107,6 +112,19 @@ class UsbCanMotorTransport:
 
     def command_velocity(self, motor_rpm: int) -> None:
         self.send(build_velocity_control(motor_rpm, self.node_id))
+
+    def command_mit(self, command: MitCommand) -> None:
+        self.send(build_mit_control(command, self.node_id))
+
+    def set_zero(self) -> None:
+        self.send(build_set_zero(self.node_id, self.host_id))
+
+    def set_node_id(self, new_node_id: int) -> None:
+        self.send(build_set_node_id(new_node_id, self.node_id, self.host_id))
+        self.node_id = new_node_id
+
+    def save_configuration(self) -> None:
+        self.send(build_save(self.node_id, self.host_id))
 
     def stop(self) -> None:
         self.send(build_stop(self.node_id, self.host_id))

@@ -1,8 +1,8 @@
 """Official motor CAN protocol and official USB-CAN AT framing.
 
-The motion surface deliberately exposes only the already bench-validated
-velocity path: type 3 enable, type 1 velocity refresh, type 2 feedback, and
-type 4 stop. Position PD and torque feed-forward are always encoded as zero.
+The beginner motion surface retains the bench-validated velocity subset.  The
+advanced MIT builder exposes the complete RS04/OpenArmX Type-1 command behind
+the firmware's low-energy limits.
 """
 
 from __future__ import annotations
@@ -26,6 +26,10 @@ KP_MAX: Final = 5000.0
 KD_MAX: Final = 100.0
 DEFAULT_REDUCTION: Final = 9.0
 DEMO_MAX_MOTOR_RPM: Final = 20
+MIT_MAX_KP: Final = 10.0
+MIT_MAX_KD: Final = 1.0
+MIT_MAX_POSITION_STEP_RAD: Final = 0.05
+MIT_MAX_VELOCITY_RAD_S: Final = 0.5
 
 MODE_RESET: Final = 0
 MODE_CALIBRATING: Final = 1
@@ -67,6 +71,15 @@ class MotorFeedback:
 
 
 @dataclass(frozen=True)
+class MitCommand:
+    position_rad: float = 0.0
+    velocity_rad_s: float = 0.0
+    kp: float = 0.0
+    kd: float = 0.0
+    torque_nm: float = 0.0
+
+
+@dataclass(frozen=True)
 class FaultReport:
     node_id: int
     fault: int
@@ -105,6 +118,9 @@ PARAMETERS: Final = (
     Parameter(0x702C, "alveolous_open", "uint8"),
     Parameter(0x702D, "iq_test", "uint8"),
     Parameter(0x702E, "dcc_set", "float"),
+    Parameter(0x7030, "torque_pos_nm_per_iq_lsb", "float", True, 0.001, 0.1),
+    Parameter(0x7031, "torque_neg_nm_per_iq_lsb", "float", True, 0.001, 0.1),
+    Parameter(0x7032, "torque_calibrated", "uint8", True, allowed_values=(0, 1)),
 )
 PARAMETER_BY_INDEX: Final = {parameter.index: parameter for parameter in PARAMETERS}
 
@@ -161,6 +177,23 @@ def build_stop(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
     return CanFrame(make_id(4, host_id, node_id), bytes(8))
 
 
+def build_set_zero(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
+    """Set the current stationary output position as the volatile joint zero."""
+    return CanFrame(make_id(6, host_id, node_id), bytes((1,)) + bytes(7))
+
+
+def build_set_node_id(
+    new_node_id: int, node_id: int = 0x7F, host_id: int = 0xFD
+) -> CanFrame:
+    if not 0 <= new_node_id <= 0x7F:
+        raise ValueError("new motor node ID must be 0..127")
+    return CanFrame(make_id(7, (new_node_id << 8) | host_id, node_id), bytes(8))
+
+
+def build_save(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
+    return CanFrame(make_id(22, host_id, node_id), bytes(8))
+
+
 def build_active_report(
     enabled: bool, node_id: int = 0x7F, host_id: int = 0xFD
 ) -> CanFrame:
@@ -199,6 +232,48 @@ def build_velocity_control(
         _encode_u16(output_rad_s, VELOCITY_MIN_RAD_S, VELOCITY_MAX_RAD_S),
         _encode_u16(0.0, 0.0, KP_MAX),
         _encode_u16(0.0, 0.0, KD_MAX),
+    )
+    return CanFrame(make_id(1, torque_raw, node_id), payload)
+
+
+def build_mit_control(command: MitCommand, node_id: int = 0x7F) -> CanFrame:
+    """Build one complete RS04 private-protocol MIT Type-1 command.
+
+    Values use output-joint units.  The application mirrors the initial bench
+    envelope; the firmware independently enforces the same limits.  A target
+    step is checked by the UI against live feedback because it is stateful.
+    """
+    import math
+
+    values = (
+        command.position_rad,
+        command.velocity_rad_s,
+        command.kp,
+        command.kd,
+        command.torque_nm,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("MIT command values must be finite")
+    if not 0 <= node_id <= 0x7F:
+        raise ValueError("motor node ID must be 0..127")
+    if not POSITION_MIN_RAD <= command.position_rad <= POSITION_MAX_RAD:
+        raise ValueError("MIT position is outside the RS04 wire range")
+    if not -MIT_MAX_VELOCITY_RAD_S <= command.velocity_rad_s <= MIT_MAX_VELOCITY_RAD_S:
+        raise ValueError("MIT velocity exceeds the initial bench limit")
+    if not 0.0 <= command.kp <= MIT_MAX_KP:
+        raise ValueError("MIT Kp exceeds the initial bench limit")
+    if not 0.0 <= command.kd <= MIT_MAX_KD:
+        raise ValueError("MIT Kd exceeds the initial bench limit")
+    if abs(command.torque_nm) > 0.001:
+        raise ValueError("MIT torque feed-forward is locked until calibration")
+
+    torque_raw = _encode_u16(command.torque_nm, TORQUE_MIN_NM, TORQUE_MAX_NM)
+    payload = struct.pack(
+        ">HHHH",
+        _encode_u16(command.position_rad, POSITION_MIN_RAD, POSITION_MAX_RAD),
+        _encode_u16(command.velocity_rad_s, VELOCITY_MIN_RAD_S, VELOCITY_MAX_RAD_S),
+        _encode_u16(command.kp, 0.0, KP_MAX),
+        _encode_u16(command.kd, 0.0, KD_MAX),
     )
     return CanFrame(make_id(1, torque_raw, node_id), payload)
 
@@ -322,7 +397,7 @@ def parse_feedback(frame: CanFrame, host_id: int = 0xFD) -> MotorFeedback | None
         faults=flags & 0x3F,
         position_rad=_decode_u16(position_raw, POSITION_MIN_RAD, POSITION_MAX_RAD),
         velocity_rad_s=_decode_u16(velocity_raw, VELOCITY_MIN_RAD_S, VELOCITY_MAX_RAD_S),
-        torque_nm=_decode_u16(torque_raw, TORQUE_MIN_NM, TORQUE_MAX_NM),
+        torque_nm=_decode_torque(torque_raw),
         temperature_c=temperature_raw / 10.0,
     )
 
@@ -407,3 +482,12 @@ def _encode_u16(value: float, minimum: float, maximum: float) -> int:
 
 def _decode_u16(raw: int, minimum: float, maximum: float) -> float:
     return minimum + (raw / 65535.0) * (maximum - minimum)
+
+
+def _decode_torque(raw: int) -> float:
+    """RS04 torque zero is wire value 0x8000; avoid the sub-LSB offset that
+    would otherwise make an all-zero MIT frame look like a tiny feed-forward
+    torque and trip the firmware calibration lock."""
+    if raw == 0x8000:
+        return 0.0
+    return _decode_u16(raw, TORQUE_MIN_NM, TORQUE_MAX_NM)
