@@ -1,4 +1,4 @@
-"""Low-energy RS04/OpenArmX MIT bench controls."""
+"""RS04/OpenArmX MIT bench controls."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ TEXT = {
         "locked": "Torque FF locked until measured calibration",
         "status": "Zero: not set | Calibration: unknown | MIT refresh: idle",
         "need_connection": "Connect and enumerate CAN first.",
-        "step": "Target must stay within 0.05 rad of live feedback.",
+        "step": "Target position is too far from live feedback.",
         "confirm_id": "Change the active motor node ID? Save config only after verifying communication.",
     },
     "zh": {
@@ -54,7 +54,7 @@ TEXT = {
         "locked": "完成实测标定前禁止前馈力矩",
         "status": "零位：未设置 | 标定：未知 | MIT 刷新：空闲",
         "need_connection": "请先连接并枚举 CAN 电机。",
-        "step": "目标位置必须在实时反馈的 ±0.05 rad 内。",
+        "step": "目标位置离实时反馈太远。",
         "confirm_id": "确定修改当前电机节点 ID？验证通信后再保存配置。",
     },
 }

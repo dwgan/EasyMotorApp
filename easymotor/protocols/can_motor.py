@@ -2,7 +2,7 @@
 
 The beginner motion surface retains the bench-validated velocity subset.  The
 advanced MIT builder exposes the complete RS04/OpenArmX Type-1 command behind
-the firmware's low-energy limits.
+the official RS04 wire ranges.
 """
 
 from __future__ import annotations
@@ -16,20 +16,20 @@ CAN_ID_MASK: Final = 0x1FFFFFFF
 AT_HEADER: Final = b"AT"
 AT_TAIL: Final = b"\r\n"
 AT_EXTENDED_FLAG: Final = 0x04
-POSITION_MIN_RAD: Final = -12.5
-POSITION_MAX_RAD: Final = 12.5
-VELOCITY_MIN_RAD_S: Final = -30.0
-VELOCITY_MAX_RAD_S: Final = 30.0
-TORQUE_MIN_NM: Final = -12.0
-TORQUE_MAX_NM: Final = 12.0
-KP_MAX: Final = 500.0
-KD_MAX: Final = 5.0
+POSITION_MIN_RAD: Final = -12.5663706
+POSITION_MAX_RAD: Final = 12.5663706
+VELOCITY_MIN_RAD_S: Final = -15.0
+VELOCITY_MAX_RAD_S: Final = 15.0
+TORQUE_MIN_NM: Final = -120.0
+TORQUE_MAX_NM: Final = 120.0
+KP_MAX: Final = 5000.0
+KD_MAX: Final = 100.0
 DEFAULT_REDUCTION: Final = 9.0
 DEMO_MAX_MOTOR_RPM: Final = 20
-MIT_MAX_KP: Final = 500.0
-MIT_MAX_KD: Final = 5.0
-MIT_MAX_POSITION_STEP_RAD: Final = 25.0
-MIT_MAX_VELOCITY_RAD_S: Final = 30.0
+MIT_MAX_KP: Final = 5000.0
+MIT_MAX_KD: Final = 100.0
+MIT_MAX_POSITION_STEP_RAD: Final = 25.1327
+MIT_MAX_VELOCITY_RAD_S: Final = 15.0
 
 MODE_RESET: Final = 0
 MODE_CALIBRATING: Final = 1
@@ -239,9 +239,10 @@ def build_velocity_control(
 def build_mit_control(command: MitCommand, node_id: int = 0x7F) -> CanFrame:
     """Build one complete RS04 private-protocol MIT Type-1 command.
 
-    Values use output-joint units.  The application mirrors the initial bench
-    envelope; the firmware independently enforces the same limits.  A target
-    step is checked by the UI against live feedback because it is stateful.
+    Values use output-joint units.  The application mirrors the official RS04
+    wire ranges; the firmware independently enforces the same limits.  A
+    target step is checked by the UI against live feedback because it is
+    stateful.
     """
     import math
 
@@ -259,11 +260,11 @@ def build_mit_control(command: MitCommand, node_id: int = 0x7F) -> CanFrame:
     if not POSITION_MIN_RAD <= command.position_rad <= POSITION_MAX_RAD:
         raise ValueError("MIT position is outside the RS04 wire range")
     if not -MIT_MAX_VELOCITY_RAD_S <= command.velocity_rad_s <= MIT_MAX_VELOCITY_RAD_S:
-        raise ValueError("MIT velocity exceeds the initial bench limit")
+        raise ValueError("MIT velocity exceeds the official RS04 limit")
     if not 0.0 <= command.kp <= MIT_MAX_KP:
-        raise ValueError("MIT Kp exceeds the initial bench limit")
+        raise ValueError("MIT Kp exceeds the official RS04 limit")
     if not 0.0 <= command.kd <= MIT_MAX_KD:
-        raise ValueError("MIT Kd exceeds the initial bench limit")
+        raise ValueError("MIT Kd exceeds the official RS04 limit")
     if abs(command.torque_nm) > 0.001:
         raise ValueError("MIT torque feed-forward is locked until calibration")
 

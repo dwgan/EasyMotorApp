@@ -30,7 +30,7 @@ _EXACT_EN: Final = {
     "完成实测标定前禁止前馈力矩": "Torque FF locked until measured calibration",
     "零位：未设置 | 标定：未知 | MIT 刷新：空闲": "Zero: not set | Calibration: unknown | MIT refresh: idle",
     "请先连接并枚举 CAN 电机。": "Connect and enumerate CAN first.",
-    "目标位置必须在实时反馈的 ±0.05 rad 内。": "Target must stay within 0.05 rad of live feedback.",
+    "目标位置离实时反馈太远。": "Target position is too far from live feedback.",
     "确定修改当前电机节点 ID？验证通信后再保存配置。": "Change the active motor node ID? Save config only after verifying communication.",
     "未设置": "not set",
     "未标定": "not calibrated",

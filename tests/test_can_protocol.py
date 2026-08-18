@@ -39,7 +39,7 @@ class CanProtocolTests(unittest.TestCase):
         frame = build_velocity_control(10)
         self.assertEqual(frame.arbitration_id, 0x0180007F)
         self.assertEqual(frame.data[0:2], bytes.fromhex("80 00"))
-        self.assertEqual(frame.data[2:4], bytes.fromhex("80 7F"))
+        self.assertEqual(frame.data[2:4], bytes.fromhex("80 FE"))
         self.assertEqual(frame.data[4:8], bytes(4))
 
     def test_openarmx_mit_golden_vector(self):
@@ -52,14 +52,14 @@ class CanProtocolTests(unittest.TestCase):
         )
         frame = build_mit_control(command, node_id=1)
         self.assertEqual(frame.arbitration_id, 0x01800001)
-        self.assertEqual(frame.data, bytes.fromhex("80 34 80 6D 05 1F 33 33"))
+        self.assertEqual(frame.data, bytes.fromhex("80 34 80 DA 00 83 02 8F"))
 
     def test_mit_safety_envelope_rejects_invalid_values(self):
         invalid = (
             MitCommand(position_rad=float("nan")),
-            MitCommand(velocity_rad_s=30.01),
-            MitCommand(kp=500.01),
-            MitCommand(kd=5.01),
+            MitCommand(velocity_rad_s=15.01),
+            MitCommand(kp=5000.01),
+            MitCommand(kd=100.01),
             MitCommand(torque_nm=0.01),
         )
         for command in invalid:
