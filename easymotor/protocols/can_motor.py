@@ -121,6 +121,7 @@ PARAMETERS: Final = (
     Parameter(0x7030, "torque_pos_nm_per_iq_lsb", "float", True, 0.001, 0.1),
     Parameter(0x7031, "torque_neg_nm_per_iq_lsb", "float", True, 0.001, 0.1),
     Parameter(0x7032, "torque_calibrated", "uint8", True, allowed_values=(0, 1)),
+    Parameter(0x7033, "rotor_alignment_valid", "uint8", True, allowed_values=(0,)),
 )
 PARAMETER_BY_INDEX: Final = {parameter.index: parameter for parameter in PARAMETERS}
 

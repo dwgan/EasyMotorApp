@@ -54,6 +54,21 @@ class CanProtocolTests(unittest.TestCase):
         self.assertEqual(frame.arbitration_id, 0x01800001)
         self.assertEqual(frame.data, bytes.fromhex("80 34 80 DA 00 83 02 8F"))
 
+    def test_openarmx_startup_sequence_requires_no_type6_zero(self):
+        command = MitCommand()
+        sequence = (
+            build_stop(node_id=1),
+            build_parameter_write(0x7005, 0, node_id=1),
+            build_enable(node_id=1),
+            build_mit_control(command, node_id=1),
+        )
+        self.assertEqual(
+            [frame.arbitration_id for frame in sequence],
+            [0x0400FD01, 0x1200FD01, 0x0300FD01, 0x01800001],
+        )
+        self.assertEqual(sequence[1].data, bytes.fromhex("05 70 00 00 00 00 00 00"))
+        self.assertEqual(sequence[3].data, bytes.fromhex("80 00 80 00 00 00 00 00"))
+
     def test_mit_safety_envelope_rejects_invalid_values(self):
         invalid = (
             MitCommand(position_rad=float("nan")),
@@ -84,6 +99,12 @@ class CanProtocolTests(unittest.TestCase):
         self.assertEqual(calibrated.data, bytes.fromhex("32 70 00 00 01 00 00 00"))
         with self.assertRaises(ValueError):
             build_parameter_write(0x7030, 0.101, node_id=1)
+
+    def test_rotor_alignment_maintenance_write_can_only_clear(self):
+        clear = build_parameter_write(0x7033, 0, node_id=1)
+        self.assertEqual(clear.data, bytes.fromhex("33 70 00 00 00 00 00 00"))
+        with self.assertRaises(ValueError):
+            build_parameter_write(0x7033, 1, node_id=1)
 
     def test_type1_rejects_speed_outside_demo_envelope(self):
         for value in (-21, 21, 5.0, True):
