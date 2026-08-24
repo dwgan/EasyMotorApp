@@ -505,6 +505,7 @@ class EasyMotorApp(tk.Tk):
         self._active_log_channel = "app"
         self.update_dialog: UpdateDialog | None = None
         self.demo_service = DemoService()
+        self.demo_speed_mode_selected = False
         self.app_mode = "demo"
 
         self._build_ui()
@@ -1075,11 +1076,37 @@ class EasyMotorApp(tk.Tk):
             self._render_demo_view()
             return
         if action == DemoAction.START_MOTOR:
+            try:
+                assert self.can_transport is not None
+                self.can_transport.select_speed_mode()
+                self.demo_speed_mode_selected = True
+                self._append_log(
+                    "event",
+                    "CAN Type 18 selected explicit run_mode=2 speed PI demo.\n",
+                )
+            except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
+                self.demo_service.cancel()
+                self._append_log("error", f"CAN speed-mode select failed: {exc}\n")
+                self._render_demo_view()
+                return
             if not self.start_motor():
                 self.demo_service.cancel()
+                self.stop_motor()
         else:
             self._execute_demo_action(action)
         self._render_demo_view()
+
+    def _restore_mit_mode_after_demo(self) -> None:
+        if not self.demo_speed_mode_selected or self.can_transport is None:
+            return
+        try:
+            self.can_transport.select_mit_mode()
+            self.demo_speed_mode_selected = False
+            self._append_log(
+                "event", "已恢复 run_mode=0 MIT 安全默认模式。\n"
+            )
+        except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
+            self._append_log("error", f"恢复 run_mode=0 失败: {exc}\n")
 
     def _start_engineer_can_run(self, direction: int) -> None:
         """Use the same bounded CAN demo service from the engineering CAN page."""
@@ -1507,6 +1534,7 @@ class EasyMotorApp(tk.Tk):
         if hasattr(self, "mit_bench_panel"):
             self.mit_bench_panel.on_stop_or_disconnect()
         self.demo_service.cancel()
+        self.demo_speed_mode_selected = False
         self.demo_view.reset_continuous()
         can_transport = self.can_transport
         self.can_transport = None
@@ -1874,6 +1902,7 @@ class EasyMotorApp(tk.Tk):
             self.rs485_state_var.set(f"RS485 MCI: {self.mci_state} ({name})")
             if self.mci_state == 0 and self.stop_pending:
                 self.stop_pending = False
+                self._restore_mit_mode_after_demo()
                 self._append_log("event", "已由 MCI 状态确认电机停止。\n")
             if (
                 self.mci_state == 0
@@ -1883,6 +1912,7 @@ class EasyMotorApp(tk.Tk):
                 self.pulse_active = False
                 self.continuous_active = False
                 self.motion_command_active = False
+                self._restore_mit_mode_after_demo()
                 self.demo_service.cancel()
                 self.command_refresh_var.set("CAN command refresh: idle")
                 self._append_log(
@@ -2846,7 +2876,7 @@ class EasyMotorApp(tk.Tk):
             self.demo_service.cancel()
             self._append_log("error", "等待 RUN 超时，请检查状态和故障。\n")
             self._operation_log("error", "Enable timed out waiting for RUN.\n")
-            self._update_control_state()
+            self.stop_motor()
             return
 
     def send_speed(self, value: int) -> bool:
@@ -2891,7 +2921,7 @@ class EasyMotorApp(tk.Tk):
         )
         self._append_log(
             "event",
-            f"持续速度运行开始: {command_rpm} motor rpm，CAN Type 1 每 250 ms 刷新；"
+            f"持续速度运行开始: {command_rpm} motor rpm，0x700A 每 250 ms 刷新；"
             "按“停止”结束。\n",
         )
 
@@ -3043,6 +3073,7 @@ class EasyMotorApp(tk.Tk):
             return
         if self.mci_state == 0 and time.monotonic() >= self.can_stop_not_before:
             self.stop_pending = False
+            self._restore_mit_mode_after_demo()
             self._append_log("event", "已确认 MCI 进入 IDLE。\n")
             self._operation_log("event", "Stop confirmed; IDLE.\n")
             return

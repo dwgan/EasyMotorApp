@@ -117,7 +117,7 @@ class DemoView(ttk.Frame):
         ttk.Label(control, text=tr(language, "choose_speed"), font=("Microsoft YaHei UI", 12)).pack()
         speeds = ttk.Frame(control)
         speeds.pack(pady=(12, 18))
-        captions = {5: "speed_low", 10: "speed_mid", 20: "speed_high"}
+        captions = {5: "speed_low", 30: "speed_mid", 100: "speed_high"}
         self.speed_buttons = []
         for speed in DEMO_SPEED_PRESETS_RPM:
             button = ttk.Radiobutton(

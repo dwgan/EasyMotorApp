@@ -25,7 +25,7 @@ TORQUE_MAX_NM: Final = 120.0
 KP_MAX: Final = 5000.0
 KD_MAX: Final = 100.0
 DEFAULT_REDUCTION: Final = 9.0
-DEMO_MAX_MOTOR_RPM: Final = 20
+DEMO_MAX_MOTOR_RPM: Final = 100
 MIT_MAX_KP: Final = 5000.0
 MIT_MAX_KD: Final = 100.0
 MIT_MAX_POSITION_STEP_RAD: Final = 25.1327
@@ -202,18 +202,33 @@ def build_active_report(
     return CanFrame(make_id(24, host_id, node_id), bytes(7) + bytes((int(enabled),)))
 
 
+def build_demo_run_mode(
+    mode: int, node_id: int = 0x7F, host_id: int = 0xFD
+) -> CanFrame:
+    """Select MIT (0) or the bounded customer-demo speed mode (2)."""
+    if isinstance(mode, bool) or not isinstance(mode, int) or mode not in (0, 2):
+        raise ValueError("demo run mode must be MIT (0) or speed PI (2)")
+    if not 0 <= node_id <= 0x7F:
+        raise ValueError("motor node ID must be 0..127")
+    return CanFrame(
+        make_id(18, host_id, node_id),
+        struct.pack("<H2xB3x", 0x7005, mode),
+    )
+
+
 def build_velocity_control(
     motor_rpm: int,
     node_id: int = 0x7F,
     *,
     reduction: float = DEFAULT_REDUCTION,
+    host_id: int = 0xFD,
 ) -> CanFrame:
-    """Build the validated type-1 velocity-only command.
+    """Build the explicit type-18 speed-PI reference at parameter 0x700A.
 
     ``motor_rpm`` is motor-shaft speed, matching the RS485 ``speed`` command
     and the beginner presets. The wire protocol carries load-side rad/s.
-    Position, Kp, Kd, and torque feed-forward stay at physical zero so this
-    helper cannot accidentally activate an unimplemented control path.
+    Firmware accepts this live reference only after run_mode=2 and Type 3 have
+    reached MOTOR, so it can never be confused with an MIT Type-1 command.
     """
     if not 0 <= node_id <= 0x7F:
         raise ValueError("motor node ID must be 0..127")
@@ -226,15 +241,10 @@ def build_velocity_control(
     if reduction <= 0.0:
         raise ValueError("reduction must be positive")
     output_rad_s = motor_rpm / reduction * (2.0 * 3.141592653589793 / 60.0)
-    torque_raw = _encode_u16(0.0, TORQUE_MIN_NM, TORQUE_MAX_NM)
-    payload = struct.pack(
-        ">HHHH",
-        _encode_u16(0.0, POSITION_MIN_RAD, POSITION_MAX_RAD),
-        _encode_u16(output_rad_s, VELOCITY_MIN_RAD_S, VELOCITY_MAX_RAD_S),
-        _encode_u16(0.0, 0.0, KP_MAX),
-        _encode_u16(0.0, 0.0, KD_MAX),
+    return CanFrame(
+        make_id(18, host_id, node_id),
+        struct.pack("<H2xf", 0x700A, output_rad_s),
     )
-    return CanFrame(make_id(1, torque_raw, node_id), payload)
 
 
 def build_mit_control(command: MitCommand, node_id: int = 0x7F) -> CanFrame:

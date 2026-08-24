@@ -26,11 +26,11 @@ class CanVelocityTransport(Protocol):
 
 
 class CanCommandRefresher:
-    """Refresh Type 1 commands without depending on GUI responsiveness.
+    """Refresh live CAN commands without depending on GUI responsiveness.
 
     The worker owns the refresh deadline.  Calls to :meth:`stop` serialize
-    against an in-flight Type 1 write, so a stale refresh cannot follow a
-    user-requested Type 4 stop.
+    against an in-flight Type 18 speed reference or Type 1 MIT write, so a
+    stale refresh cannot follow a user-requested Type 4 stop.
     """
 
     def __init__(

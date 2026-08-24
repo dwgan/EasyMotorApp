@@ -53,10 +53,9 @@ class DemoService:
             self.plan = plan
             self.phase = DemoPhase.PREPARING
             return DemoAction.START_MOTOR
-        if mci_state == 6:
-            self.plan = plan
-            self.phase = DemoPhase.RUNNING
-            return self._run_action(plan)
+        # The customer demo owns an explicit mode-2 -> Type-3 -> 0x700A
+        # sequence.  Never take over a motor that another path already left
+        # in RUN because its selected run mode cannot be proven here.
         raise DemoError("demo_unsafe")
 
     def motor_ready(self) -> DemoAction | None:

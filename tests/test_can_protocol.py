@@ -1,3 +1,4 @@
+import struct
 import unittest
 
 from easymotor.protocols.can_motor import (
@@ -7,6 +8,7 @@ from easymotor.protocols.can_motor import (
     MitCommand,
     build_active_report,
     build_device_id_request,
+    build_demo_run_mode,
     build_enable,
     build_parameter_read,
     build_parameter_write,
@@ -35,12 +37,28 @@ class CanProtocolTests(unittest.TestCase):
             CanFrame(0x1800FD7F, bytes.fromhex("00 00 00 00 00 00 00 01")),
         )
 
-    def test_type1_demo_velocity_keeps_all_reserved_fields_at_zero(self):
-        frame = build_velocity_control(10)
-        self.assertEqual(frame.arbitration_id, 0x0180007F)
-        self.assertEqual(frame.data[0:2], bytes.fromhex("80 00"))
-        self.assertEqual(frame.data[2:4], bytes.fromhex("80 FE"))
-        self.assertEqual(frame.data[4:8], bytes(4))
+    def test_demo_velocity_uses_explicit_type18_speed_reference(self):
+        frame = build_velocity_control(100)
+        self.assertEqual(frame.arbitration_id, 0x1200FD7F)
+        self.assertEqual(frame.data[0:4], bytes.fromhex("0A 70 00 00"))
+        self.assertAlmostEqual(
+            struct.unpack("<f", frame.data[4:8])[0],
+            100 / 9 * (2 * 3.141592653589793 / 60),
+            places=6,
+        )
+
+    def test_demo_mode_select_only_allows_mit_and_speed_pi(self):
+        self.assertEqual(
+            build_demo_run_mode(2).data,
+            bytes.fromhex("05 70 00 00 02 00 00 00"),
+        )
+        self.assertEqual(
+            build_demo_run_mode(0).data,
+            bytes.fromhex("05 70 00 00 00 00 00 00"),
+        )
+        for value in (7, 2.0, False):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                build_demo_run_mode(value)
 
     def test_openarmx_mit_golden_vector(self):
         command = MitCommand(
@@ -106,8 +124,8 @@ class CanProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_parameter_write(0x7033, 1, node_id=1)
 
-    def test_type1_rejects_speed_outside_demo_envelope(self):
-        for value in (-21, 21, 5.0, True):
+    def test_speed_reference_rejects_values_outside_demo_envelope(self):
+        for value in (-101, 101, 5.0, True):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     build_velocity_control(value)

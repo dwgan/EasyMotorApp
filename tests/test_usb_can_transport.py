@@ -46,9 +46,11 @@ class UsbCanTransportTests(unittest.TestCase):
         transport.connect("COM_TEST")
         transport.set_active_report(True)
         transport.enumerate()
+        transport.select_speed_mode()
         transport.enable()
         transport.command_velocity(5)
         transport.stop()
+        transport.select_mit_mode()
         transport.close()
 
         adapter = instances[0]
@@ -56,8 +58,13 @@ class UsbCanTransportTests(unittest.TestCase):
         self.assertEqual(adapter.settings["baudrate"], USB_CAN_BAUD)
         self.assertTrue(adapter.closed)
         frames = [AtFrameDecoder().feed(raw)[0] for raw in adapter.writes]
-        self.assertEqual([frame.arbitration_id >> 24 for frame in frames], [24, 0, 3, 1, 4])
-        self.assertEqual(frames[3].data[4:8], bytes(4))
+        self.assertEqual(
+            [frame.arbitration_id >> 24 for frame in frames],
+            [24, 0, 18, 3, 18, 4, 18],
+        )
+        self.assertEqual(frames[2].data, bytes.fromhex("05 70 00 00 02 00 00 00"))
+        self.assertEqual(frames[4].data[:4], bytes.fromhex("0A 70 00 00"))
+        self.assertEqual(frames[6].data, bytes.fromhex("05 70 00 00 00 00 00 00"))
 
 
 if __name__ == "__main__":

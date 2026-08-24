@@ -14,6 +14,7 @@ from easymotor.protocols.can_motor import (
     CanFrame,
     build_active_report,
     build_device_id_request,
+    build_demo_run_mode,
     build_enable,
     build_mit_control,
     build_save,
@@ -110,8 +111,18 @@ class UsbCanMotorTransport:
     def enable(self) -> None:
         self.send(build_enable(self.node_id, self.host_id))
 
+    def select_speed_mode(self) -> None:
+        self.send(build_demo_run_mode(2, self.node_id, self.host_id))
+
+    def select_mit_mode(self) -> None:
+        self.send(build_demo_run_mode(0, self.node_id, self.host_id))
+
     def command_velocity(self, motor_rpm: int) -> None:
-        self.send(build_velocity_control(motor_rpm, self.node_id))
+        self.send(
+            build_velocity_control(
+                motor_rpm, self.node_id, host_id=self.host_id
+            )
+        )
 
     def command_mit(self, command: MitCommand) -> None:
         self.send(build_mit_control(command, self.node_id))

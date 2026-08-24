@@ -10,14 +10,14 @@ from easymotor.services.demo_service import DemoAction, DemoPhase, DemoService
 
 class DemoSafetyTests(unittest.TestCase):
     def test_demo_defaults_are_fixed_product_choices(self):
-        self.assertEqual(DEMO_SPEED_PRESETS_RPM, (5, 10, 20))
+        self.assertEqual(DEMO_SPEED_PRESETS_RPM, (5, 30, 100))
         self.assertEqual(DEMO_DEFAULT_DURATION_MS, 5000)
-        plan = make_demo_plan(-1, 10, False)
-        self.assertEqual(plan.command_rpm, -10)
+        plan = make_demo_plan(-1, 30, False)
+        self.assertEqual(plan.command_rpm, -30)
         self.assertEqual(plan.duration_ms, 5000)
 
     def test_invalid_demo_values_are_rejected(self):
-        for args in ((0, 5, False, 5000), (1, 6, False, 5000), (1, 5, False, 6000)):
+        for args in ((0, 5, False, 5000), (1, 20, False, 5000), (1, 5, False, 6000)):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 make_demo_plan(*args)
 
@@ -36,18 +36,19 @@ class DemoSafetyTests(unittest.TestCase):
         self.assertEqual(service.motor_ready(), DemoAction.RUN_TIMED)
         self.assertEqual(service.phase, DemoPhase.RUNNING)
 
-    def test_continuous_run_requires_an_explicit_plan(self):
+    def test_continuous_run_requires_idle_then_explicit_start(self):
         service = DemoService()
         action = service.request_run(
             direction=-1,
-            speed_rpm=20,
+            speed_rpm=100,
             continuous=True,
             connected=True,
-            mci_state=6,
+            mci_state=0,
             another_operation_active=False,
         )
-        self.assertEqual(action, DemoAction.RUN_CONTINUOUS)
-        self.assertEqual(service.plan.command_rpm, -20)
+        self.assertEqual(action, DemoAction.START_MOTOR)
+        self.assertEqual(service.plan.command_rpm, -100)
+        self.assertEqual(service.motor_ready(), DemoAction.RUN_CONTINUOUS)
         service.cancel()
         self.assertEqual(service.phase, DemoPhase.IDLE)
         self.assertIsNone(service.plan)
@@ -57,6 +58,7 @@ class DemoSafetyTests(unittest.TestCase):
             dict(connected=False, mci_state=0, another_operation_active=False),
             dict(connected=True, mci_state=0, another_operation_active=True),
             dict(connected=True, mci_state=4, another_operation_active=False),
+            dict(connected=True, mci_state=6, another_operation_active=False),
         )
         for state in cases:
             with self.subTest(state=state), self.assertRaises(ValueError):
