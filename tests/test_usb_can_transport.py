@@ -33,6 +33,30 @@ class FakeSerial:
 
 
 class UsbCanTransportTests(unittest.TestCase):
+    def test_enumeration_probe_does_not_change_motion_target(self):
+        events = queue.Queue()
+        instances = []
+
+        def factory(**settings):
+            instance = FakeSerial(**settings)
+            instances.append(instance)
+            return instance
+
+        transport = UsbCanMotorTransport(
+            events, node_id=2, serial_factory=factory
+        )
+        transport.connect("COM_TEST")
+        transport.enumerate(0x7F)
+        transport.set_node_id(3)
+        transport.enable()
+        transport.close()
+
+        frames = [AtFrameDecoder().feed(raw)[0] for raw in instances[0].writes]
+        self.assertEqual(frames[0].arbitration_id & 0xFF, 0x7F)
+        self.assertEqual(frames[1].arbitration_id & 0xFF, 2)
+        self.assertEqual(frames[2].arbitration_id & 0xFF, 2)
+        self.assertEqual(transport.node_id, 2)
+
     def test_transport_uses_vendor_baud_and_only_validated_demo_frames(self):
         events = queue.Queue()
         instances = []

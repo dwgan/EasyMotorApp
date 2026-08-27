@@ -8,6 +8,7 @@ from tkinter import ttk
 
 from easymotor.core.safety_policy import (
     DEMO_DEFAULT_DURATION_MS,
+    DEMO_DEFAULT_SPEED_RPM,
     DEMO_SPEED_PRESETS_RPM,
 )
 from easymotor.i18n import tr
@@ -21,11 +22,13 @@ class DemoView(ttk.Frame):
         *,
         port_var: tk.StringVar,
         connection_var: tk.StringVar,
+        device_var: tk.StringVar,
         temperature_var: tk.StringVar,
         interface_var: tk.StringVar,
         language_var: tk.StringVar,
         on_refresh: Callable[[], None],
         on_toggle_connection: Callable[[], None],
+        on_detect_device: Callable[[], None],
         on_interface_changed: Callable[[], None],
         on_language_changed: Callable[[], None],
         on_run: Callable[[int, int, bool], None],
@@ -35,17 +38,19 @@ class DemoView(ttk.Frame):
         super().__init__(master, padding=24)
         self.port_var = port_var
         self.connection_var = connection_var
+        self.device_var = device_var
         self.temperature_var = temperature_var
         self.interface_var = interface_var
         self.language_var = language_var
         self._on_refresh = on_refresh
         self._on_toggle_connection = on_toggle_connection
+        self._on_detect_device = on_detect_device
         self._on_interface_changed = on_interface_changed
         self._on_language_changed = on_language_changed
         self._on_run = on_run
         self._on_stop = on_stop
         self._on_engineer_mode = on_engineer_mode
-        self.speed_var = tk.IntVar(value=DEMO_SPEED_PRESETS_RPM[0])
+        self.speed_var = tk.IntVar(value=DEMO_DEFAULT_SPEED_RPM)
         self.continuous_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="")
         self._ports: tuple[str, ...] = ()
@@ -94,16 +99,36 @@ class DemoView(ttk.Frame):
             connection, textvariable=self.port_var, width=14, state="readonly", values=self._ports
         )
         self.port_combo.grid(row=0, column=2, padx=(0, 8))
-        self.refresh_button = ttk.Button(connection, text=tr(language, "refresh"), command=self._on_refresh)
-        self.refresh_button.grid(row=0, column=3, padx=(0, 12))
+        connection_actions = ttk.Frame(connection)
+        connection_actions.grid(row=0, column=3, sticky="w")
+        self.refresh_button = ttk.Button(
+            connection_actions,
+            text=tr(language, "refresh"),
+            command=self._on_refresh,
+            width=13,
+        )
+        self.refresh_button.grid(row=0, column=0, padx=4)
         self.connect_button = ttk.Button(
-            connection, text=tr(language, "connect"), command=self._on_toggle_connection
+            connection_actions,
+            text=tr(language, "connect"),
+            command=self._on_toggle_connection,
+            width=13,
         )
-        self.connect_button.grid(row=0, column=4, padx=(0, 14))
+        self.connect_button.grid(row=0, column=1, padx=4)
+        self.detect_button = ttk.Button(
+            connection_actions,
+            text=tr(language, "detect_device"),
+            command=self._on_detect_device,
+            width=13,
+        )
+        self.detect_button.grid(row=0, column=2, padx=4)
         ttk.Label(connection, textvariable=self.connection_var).grid(
-            row=1, column=0, columnspan=5, pady=(10, 0), sticky="w"
+            row=1, column=0, columnspan=3, pady=(10, 0), sticky="w"
         )
-        connection.columnconfigure(4, weight=1)
+        ttk.Label(connection, textvariable=self.device_var).grid(
+            row=1, column=3, pady=(10, 0), sticky="w"
+        )
+        connection.columnconfigure(3, weight=1)
 
         status = ttk.LabelFrame(self, text=tr(language, "motor_status"), padding=18)
         status.pack(fill=tk.X, pady=(18, 0))
@@ -177,10 +202,14 @@ class DemoView(ttk.Frame):
         run_enabled: bool,
         stop_enabled: bool,
         settings_enabled: bool,
+        detect_enabled: bool,
     ) -> None:
         self.connect_button.configure(text=tr(self.language, "disconnect" if connected else "connect"))
         connect_state = tk.NORMAL if settings_enabled or connected else tk.DISABLED
         self.connect_button.configure(state=connect_state)
+        self.detect_button.configure(
+            state=tk.NORMAL if detect_enabled else tk.DISABLED
+        )
         settings_state = tk.NORMAL if settings_enabled and not connected else tk.DISABLED
         self.refresh_button.configure(state=settings_state)
         self.port_combo.configure(state="readonly" if settings_state == tk.NORMAL else tk.DISABLED)

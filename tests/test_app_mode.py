@@ -17,9 +17,11 @@ class _InterfaceSelection:
 class _CanTransport:
     def __init__(self) -> None:
         self.enumeration_count = 0
+        self.probed_node_ids = []
 
-    def enumerate(self) -> None:
+    def enumerate(self, node_id=None) -> None:
         self.enumeration_count += 1
+        self.probed_node_ids.append(node_id)
 
 
 class _DebugSerial:
@@ -89,6 +91,20 @@ class AppModeInterfaceTests(unittest.TestCase):
         )
         self.assertIn("set_active_report(False)", motor_source)
 
+    def test_enable_is_retried_only_while_feedback_remains_reset(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+        poll_begin = source.index("    def _poll_start_sequence(")
+        poll_end = source.index("    def send_speed(", poll_begin)
+        poll_source = source[poll_begin:poll_end]
+
+        self.assertIn('self.mci_state == 0', poll_source)
+        self.assertIn('self.can_transport.enable()', poll_source)
+        self.assertIn('START_ENABLE_MAX_ATTEMPTS', poll_source)
+        self.assertLess(
+            poll_source.index('if self.mci_state == 6:'),
+            poll_source.index('self.mci_state == 0'),
+        )
+
     def test_reset_report_does_not_disable_alignment_reporting(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
         reset_begin = source.index("if feedback.mode == MODE_RESET:")
@@ -124,58 +140,59 @@ class AppModeInterfaceTests(unittest.TestCase):
     def test_rs485_debug_tab_exposes_waveform_window(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
         monitor_start = source.index("motion_frame = ttk.LabelFrame(")
-        can_start = source.index("can_motion = ttk.LabelFrame(", monitor_start)
+        can_start = source.index("self.mit_bench_panel = MitBenchPanel(", monitor_start)
         monitor_source = source[monitor_start:can_start]
 
         self.assertIn("self.engineer_rs485_tab", monitor_source)
         self.assertIn("command=self.open_wave_popup", monitor_source)
 
-    def test_engineer_can_page_has_only_bounded_can_motion_controls(self):
+    def test_engineer_can_page_uses_mit_as_primary_motion_control(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
-        can_motion_start = source.index("can_motion = ttk.LabelFrame(")
-        feedback_start = source.index("can_feedback = ttk.LabelFrame(", can_motion_start)
-        can_source = source[can_motion_start:feedback_start]
+        mit_start = source.index("self.mit_bench_panel = MitBenchPanel(")
+        parameter_start = source.index("parameter_frame = ttk.LabelFrame(", mit_start)
+        can_source = source[mit_start:parameter_start]
 
-        self.assertIn("DEMO_SPEED_PRESETS_RPM", can_source)
-        self.assertIn("self._start_engineer_can_run(1)", can_source)
-        self.assertIn("self._start_engineer_can_run(-1)", can_source)
-        self.assertIn("command=self.stop_motor", can_source)
-        self.assertNotIn("command=self.open_wave_popup", can_source)
+        self.assertIn("self.mit_bench_panel = MitBenchPanel(", can_source)
+        self.assertIn("enable=self.start_motor", can_source)
+        self.assertIn("stop=self.stop_motor", can_source)
+        self.assertIn("save_alignment=self._save_rotor_alignment", can_source)
+        self.assertNotIn("CAN 安全演示控制", can_source)
+        self.assertNotIn("DEMO_SPEED_PRESETS_RPM", can_source)
 
-    def test_can_feedback_does_not_duplicate_temperature_or_refresh_state(self):
+    def test_can_feedback_is_compactly_integrated_into_connection(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
-        motion_start = source.index("can_motion = ttk.LabelFrame(")
-        feedback_start = source.index("can_feedback = ttk.LabelFrame(", motion_start)
-        parameter_start = source.index("parameter_frame = ttk.LabelFrame(", feedback_start)
+        connection_start = source.index("can_connection = ttk.LabelFrame(")
+        mit_start = source.index("self.mit_bench_panel = MitBenchPanel(", connection_start)
+        connection_source = source[connection_start:mit_start]
 
-        self.assertIn("textvariable=self.command_refresh_var", source[motion_start:feedback_start])
-        self.assertNotIn(
-            "textvariable=self.command_refresh_var",
-            source[feedback_start:parameter_start],
-        )
+        self.assertIn("textvariable=self.can_feedback_var", connection_source)
+        self.assertIn("textvariable=self.temperature_var", connection_source)
+        self.assertIn('font=("Consolas", 10)', connection_source)
+        self.assertNotIn("can_feedback = ttk.LabelFrame(", source)
         render_start = source.index("    def _render_can_feedback(")
         render_end = source.index("    def _temperature_poll_tick(", render_start)
         render_source = source[render_start:render_end]
         self.assertNotIn("board_temperature_c", render_source)
         self.assertNotIn("motor_temperature_c", render_source)
+        self.assertIn("feedback.velocity_rad_s: .4f", render_source)
+
+        mit_source = Path("easymotor/features/mit_bench/panel.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("feedback.velocity_rad_s: .4f", mit_source)
+        self.assertIn('font=("Consolas", 10)', mit_source)
 
     def test_rs485_raw_diagnostics_are_collapsed_by_default(self):
         app = object.__new__(EasyMotorApp)
         app.rs485_details_visible = False
         self.assertFalse(app.rs485_details_visible)
 
-    def test_engineer_can_run_reuses_demo_safety_service(self):
-        app = object.__new__(EasyMotorApp)
-        app.engineer_can_speed_var = _InterfaceSelection(10)
-        app.engineer_can_continuous_var = _InterfaceSelection(True)
-        calls = []
-        app.start_demo_run = lambda direction, speed, continuous: calls.append(
-            (direction, speed, continuous)
-        )
+    def test_engineer_can_page_does_not_duplicate_customer_speed_demo(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
 
-        app._start_engineer_can_run(-1)
-
-        self.assertEqual(calls, [(-1, 10, True)])
+        self.assertNotIn("def _start_engineer_can_run", source)
+        self.assertNotIn("engineer_can_speed_var", source)
+        self.assertNotIn("engineer_can_continuous_var", source)
 
     def test_motion_connection_remains_can_in_every_page(self):
         app = object.__new__(EasyMotorApp)
@@ -281,7 +298,62 @@ class AppModeInterfaceTests(unittest.TestCase):
         app._retry_can_enumeration(4)
 
         self.assertEqual(transport.enumeration_count, 1)
+        self.assertEqual(transport.probed_node_ids, [0x7F])
         self.assertEqual(len(scheduled), 1)
+
+    def test_can_connection_exposes_full_read_only_device_detection(self):
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+
+        self.assertIn('text="检测 CAN ID", command=self.detect_can_device', source)
+        self.assertNotIn("advanced_can_save_button", source)
+        self.assertNotIn("def save_detected_can_configuration", source)
+        self.assertIn("CAN_DETECTION_NODE_IDS", source)
+        self.assertIn("self.can_transport.enumerate(node_id)", source)
+        self.assertIn('self.can_device_var.set(f"CAN ID: {node_id}', source)
+        self.assertIn("self.can_parameter_panel.node_id = node_id", source)
+        self.assertIn("def set_detected_can_id(self)", source)
+        self.assertIn("CAN ID change verified", source)
+        self.assertIn("self.can_new_node_id_var = tk.IntVar(value=1)", source)
+        self.assertIn("CAN ID {node_id} verified; Type 22 flash save requested", source)
+
+        panel_source = Path("easymotor/features/mit_bench/panel.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('"apply_id"', panel_source)
+        self.assertNotIn("self.node_var", panel_source)
+
+        demo_source = Path("easymotor/features/demo/view.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('text=tr(language, "detect_device")', demo_source)
+        self.assertIn("command=self._on_detect_device", demo_source)
+        self.assertNotIn("set_detected_can_id", demo_source)
+
+    def test_rotor_alignment_save_requires_valid_7033_then_sends_type22(self):
+        class _Transport:
+            def __init__(self):
+                self.save_count = 0
+
+            def save_configuration(self):
+                self.save_count += 1
+
+        app = object.__new__(EasyMotorApp)
+        transport = _Transport()
+        app.can_transport = transport
+        app._parameter_connection_ready = lambda: True
+        app._parameter_operation_idle = lambda: True
+        app._append_log = lambda *args: None
+        app._operation_log = lambda *args: None
+
+        app.rotor_alignment_valid = False
+        with self.assertRaises(RuntimeError):
+            app._save_rotor_alignment()
+        self.assertEqual(transport.save_count, 0)
+
+        app.rotor_alignment_valid = True
+        with patch("easymotor_app.messagebox.askyesno", return_value=True):
+            app._save_rotor_alignment()
+        self.assertEqual(transport.save_count, 1)
 
     def test_stale_can_discovery_callback_stops_after_ready_or_disconnect(self):
         app = object.__new__(EasyMotorApp)

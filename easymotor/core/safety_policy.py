@@ -7,6 +7,7 @@ from typing import Final
 
 
 DEMO_SPEED_PRESETS_RPM: Final = (5, 30, 100)
+DEMO_DEFAULT_SPEED_RPM: Final = 30
 DEMO_DEFAULT_DURATION_MS: Final = 5_000
 
 

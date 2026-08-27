@@ -2,6 +2,7 @@ import unittest
 
 from easymotor.core.safety_policy import (
     DEMO_DEFAULT_DURATION_MS,
+    DEMO_DEFAULT_SPEED_RPM,
     DEMO_SPEED_PRESETS_RPM,
     make_demo_plan,
 )
@@ -11,6 +12,7 @@ from easymotor.services.demo_service import DemoAction, DemoPhase, DemoService
 class DemoSafetyTests(unittest.TestCase):
     def test_demo_defaults_are_fixed_product_choices(self):
         self.assertEqual(DEMO_SPEED_PRESETS_RPM, (5, 30, 100))
+        self.assertEqual(DEMO_DEFAULT_SPEED_RPM, 30)
         self.assertEqual(DEMO_DEFAULT_DURATION_MS, 5000)
         plan = make_demo_plan(-1, 30, False)
         self.assertEqual(plan.command_rpm, -30)

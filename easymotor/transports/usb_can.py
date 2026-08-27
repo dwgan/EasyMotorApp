@@ -102,8 +102,10 @@ class UsbCanMotorTransport:
         if reader_thread is not None and reader_thread is not threading.current_thread():
             reader_thread.join(timeout=0.2)
 
-    def enumerate(self) -> None:
-        self.send(build_device_id_request(self.node_id, self.host_id))
+    def enumerate(self, node_id: int | None = None) -> None:
+        """Probe one node without changing the active motion target."""
+        target_id = self.node_id if node_id is None else node_id
+        self.send(build_device_id_request(target_id, self.host_id))
 
     def set_active_report(self, enabled: bool) -> None:
         self.send(build_active_report(enabled, self.node_id, self.host_id))
@@ -132,7 +134,6 @@ class UsbCanMotorTransport:
 
     def set_node_id(self, new_node_id: int) -> None:
         self.send(build_set_node_id(new_node_id, self.node_id, self.host_id))
-        self.node_id = new_node_id
 
     def save_configuration(self) -> None:
         self.send(build_save(self.node_id, self.host_id))
