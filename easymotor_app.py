@@ -428,6 +428,7 @@ class EasyMotorApp(tk.Tk):
         self.start_deadline = 0.0
         self.start_enable_attempts = 0
         self.start_enable_retry_at = 0.0
+        self.pending_mit_single_command: MitCommand | None = None
         self.motion_command_active = False
         self.pulse_active = False
         self.continuous_active = False
@@ -1632,6 +1633,7 @@ class EasyMotorApp(tk.Tk):
         self.can_active_report_enabled = False
         self.active_interface = None
         self.start_waiting = False
+        self.pending_mit_single_command = None
         self.motion_command_active = False
         self.pulse_active = False
         self.continuous_active = False
@@ -3006,9 +3008,20 @@ class EasyMotorApp(tk.Tk):
             self.start_enable_attempts = 0
             self._append_log("event", "MCU 已进入 RUN，可以施加 Iq/速度。\n")
             self._operation_log("event", "Entered RUN.\n")
-            demo_action = self.demo_service.motor_ready()
-            if demo_action is not None:
-                self._execute_demo_action(demo_action)
+            pending_mit_command = self.pending_mit_single_command
+            self.pending_mit_single_command = None
+            if pending_mit_command is not None:
+                try:
+                    self._send_mit_single_frame(pending_mit_command)
+                except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
+                    self._append_log("error", f"MIT single pulse failed: {exc}\n", "can")
+                    self._operation_log("error", "MIT single pulse failed; stopping.\n")
+                    self.stop_motor()
+                    return
+            else:
+                demo_action = self.demo_service.motor_ready()
+                if demo_action is not None:
+                    self._execute_demo_action(demo_action)
             self._update_control_state()
             return
         if (
@@ -3149,12 +3162,34 @@ class EasyMotorApp(tk.Tk):
 
     def _mit_send_once(self, command: MitCommand) -> None:
         transport = self.can_transport
+        if transport is None or not self._parameter_connection_ready():
+            raise RuntimeError("CAN is not connected and enumerated")
+        if self.pending_mit_single_command is not None or self.start_waiting:
+            raise RuntimeError("MIT single pulse is already preparing")
+        if self.mci_state == 0:
+            self.pending_mit_single_command = command
+            if not self.start_motor():
+                self.pending_mit_single_command = None
+                raise RuntimeError("failed to enable the motor for the MIT single pulse")
+            self._append_log(
+                "event",
+                "MIT single pulse requested; enabling and waiting for MOTOR feedback.\n",
+                "can",
+            )
+            self._operation_log("event", "MIT single pulse preparing.\n")
+            return
+        if self.mci_state != 6:
+            raise RuntimeError("motor state is not ready for an MIT single pulse")
+        self._send_mit_single_frame(command)
+
+    def _send_mit_single_frame(self, command: MitCommand) -> None:
+        transport = self.can_transport
         if transport is None or self.mci_state != 6:
-            raise RuntimeError("enable the motor and wait for MOTOR feedback first")
+            raise RuntimeError("motor did not enter MOTOR mode")
         transport.command_mit(command)
         self.motion_command_active = True
-        self._append_log("tx", f"MIT command once: {command}\n", "can")
-        self._operation_log("tx", f"MIT single command: {command}\n")
+        self._append_log("tx", f"MIT single pulse: {command}\n", "can")
+        self._operation_log("tx", f"MIT single pulse sent: {command}\n")
         # A single frame is intentionally a bounded bench pulse, not a hidden
         # hold mode.  If the caller does not immediately start the 100 Hz
         # refresher, stop before the firmware watchdog has to intervene.
@@ -3165,8 +3200,10 @@ class EasyMotorApp(tk.Tk):
             self.stop_motor()
 
     def _mit_start_hold(self, command: MitCommand) -> None:
-        self._mit_send_once(command)
-        assert self.can_transport is not None
+        if self.can_transport is None or self.mci_state != 6:
+            raise RuntimeError("enable the motor and wait for MOTOR feedback first")
+        self.can_transport.command_mit(command)
+        self.motion_command_active = True
         self.can_command_refresher.stop()
         self.mit_command_refresher.start_mit(self.can_transport, command)
         self.continuous_active = True
@@ -3288,6 +3325,7 @@ class EasyMotorApp(tk.Tk):
         self.motion_command_active = False
         self.start_waiting = False
         self.start_enable_attempts = 0
+        self.pending_mit_single_command = None
         self.command_refresh_var.set("CAN command refresh: idle")
         if hasattr(self, "mit_bench_panel"):
             self.mit_bench_panel.on_stop_or_disconnect()

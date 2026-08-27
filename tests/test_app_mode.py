@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from easymotor_app import EasyMotorApp
+from easymotor.protocols.can_motor import MitCommand
 
 
 class _InterfaceSelection:
@@ -354,6 +355,48 @@ class AppModeInterfaceTests(unittest.TestCase):
         with patch("easymotor_app.messagebox.askyesno", return_value=True):
             app._save_rotor_alignment()
         self.assertEqual(transport.save_count, 1)
+
+    def test_mit_single_pulse_auto_enables_from_idle_and_stops_after_200_ms(self):
+        class _Transport:
+            def __init__(self):
+                self.commands = []
+
+            def command_mit(self, command):
+                self.commands.append(command)
+
+        app = object.__new__(EasyMotorApp)
+        transport = _Transport()
+        command = MitCommand(0.0, 0.0, 0.0, 0.0, 0.0)
+        scheduled = []
+        app.can_transport = transport
+        app.mci_state = 0
+        app.pending_mit_single_command = None
+        app.start_waiting = False
+        app.motion_command_active = False
+        app._parameter_connection_ready = lambda: True
+        app.start_motor = lambda: True
+        app._append_log = lambda *args: None
+        app._operation_log = lambda *args: None
+        app.after = lambda delay, callback: scheduled.append((delay, callback))
+
+        app._mit_send_once(command)
+        self.assertIs(app.pending_mit_single_command, command)
+        self.assertEqual(transport.commands, [])
+
+        app.mci_state = 6
+        app.pending_mit_single_command = None
+        app._send_mit_single_frame(command)
+        self.assertEqual(transport.commands, [command])
+        self.assertTrue(app.motion_command_active)
+        self.assertEqual(scheduled[0][0], 200)
+
+        source = Path("easymotor_app.py").read_text(encoding="utf-8")
+        poll_start = source.index("    def _poll_start_sequence(")
+        send_start = source.index("    def send_speed(", poll_start)
+        self.assertIn(
+            "self._send_mit_single_frame(pending_mit_command)",
+            source[poll_start:send_start],
+        )
 
     def test_stale_can_discovery_callback_stops_after_ready_or_disconnect(self):
         app = object.__new__(EasyMotorApp)

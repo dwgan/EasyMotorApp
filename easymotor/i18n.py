@@ -32,7 +32,7 @@ _EXACT_EN: Final = {
     "使能 / 对齐": "Enable / align",
     "停止 / 失能": "STOP / Disable",
     "前馈力矩（Nm）": "Torque FF (Nm)",
-    "单次发送": "Send once",
+    "单次脉冲（200 ms）": "Single Pulse (200 ms)",
     "100 Hz 保持": "Hold at 100 Hz",
     "完成实测标定前禁止前馈力矩": "Torque FF locked until measured calibration",
     "零位：未设置 | 标定：未知 | MIT 刷新：空闲": "Zero: not set | Calibration: unknown | MIT refresh: idle",
