@@ -94,6 +94,14 @@ class CanCommandRefresher:
             self._generation += 1
             self._condition.notify_all()
 
+    def update_mit(self, command: MitCommand) -> None:
+        """Replace the live MIT command without resetting safety deadlines."""
+        with self._condition:
+            if not self._enabled or self._mit_command is None:
+                raise RuntimeError("MIT refresh is not active")
+            self._mit_command = command
+            self._condition.notify_all()
+
     def stop(self) -> None:
         with self._condition:
             self._enabled = False

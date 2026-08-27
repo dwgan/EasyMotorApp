@@ -39,6 +39,22 @@ class _DebugSerial:
 
 
 class AppModeInterfaceTests(unittest.TestCase):
+    def test_confirmed_stop_immediately_refreshes_demo_state(self):
+        app = object.__new__(EasyMotorApp)
+        app.stop_pending = True
+        app.mci_state = 0
+        app.can_stop_not_before = 0.0
+        app._restore_mit_mode_after_demo = lambda: None
+        app._append_log = lambda *args: None
+        app._operation_log = lambda *args: None
+        refreshes = []
+        app._update_control_state = lambda: refreshes.append(True)
+
+        app._stop_retry_tick()
+
+        self.assertFalse(app.stop_pending)
+        self.assertEqual(refreshes, [True])
+
     def test_advanced_rs485_controls_are_explicitly_labeled(self):
         source = Path("easymotor_app.py").read_text(encoding="utf-8")
 

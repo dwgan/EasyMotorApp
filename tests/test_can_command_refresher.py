@@ -86,6 +86,24 @@ class CanCommandRefresherTests(unittest.TestCase):
         finally:
             refresher.close()
 
+    def test_live_mit_command_can_be_updated_without_restart(self):
+        events = queue.Queue()
+        transport = FakeTransport()
+        refresher = CanCommandRefresher(
+            events, interval_s=0.01, feedback_timeout_s=0.2
+        )
+        first = MitCommand(kd=0.5)
+        updated = MitCommand(velocity_rad_s=1.0, kd=0.5)
+        try:
+            refresher.start_mit(transport, first)
+            refresher.update_mit(updated)
+            deadline = time.monotonic() + 0.2
+            while updated not in transport.mit_commands and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertIn(updated, transport.mit_commands)
+        finally:
+            refresher.close()
+
     def test_timed_deadline_is_enforced_by_worker(self):
         events = queue.Queue()
         transport = FakeTransport()

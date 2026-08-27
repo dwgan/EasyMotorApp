@@ -32,6 +32,7 @@ class DemoView(ttk.Frame):
         on_interface_changed: Callable[[], None],
         on_language_changed: Callable[[], None],
         on_run: Callable[[int, int, bool], None],
+        on_interactive_run: Callable[[str], None],
         on_stop: Callable[[], None],
         on_engineer_mode: Callable[[], None],
     ) -> None:
@@ -48,10 +49,12 @@ class DemoView(ttk.Frame):
         self._on_interface_changed = on_interface_changed
         self._on_language_changed = on_language_changed
         self._on_run = on_run
+        self._on_interactive_run = on_interactive_run
         self._on_stop = on_stop
         self._on_engineer_mode = on_engineer_mode
         self.speed_var = tk.IntVar(value=DEMO_DEFAULT_SPEED_RPM)
         self.continuous_var = tk.BooleanVar(value=False)
+        self.effect_var = tk.StringVar(value="spring")
         self.status_var = tk.StringVar(value="")
         self._ports: tuple[str, ...] = ()
 
@@ -139,8 +142,15 @@ class DemoView(ttk.Frame):
 
         control = ttk.LabelFrame(self, text=tr(language, "demo_control"), padding=20)
         control.pack(fill=tk.BOTH, expand=True, pady=(18, 0))
-        ttk.Label(control, text=tr(language, "choose_speed"), font=("Microsoft YaHei UI", 12)).pack()
-        speeds = ttk.Frame(control)
+        modes = ttk.Notebook(control)
+        modes.pack(fill=tk.BOTH, expand=True)
+        steady = ttk.Frame(modes, padding=12)
+        interactive = ttk.Frame(modes, padding=12)
+        modes.add(steady, text=tr(language, "steady_spin"))
+        modes.add(interactive, text=tr(language, "interactive_effects"))
+
+        ttk.Label(steady, text=tr(language, "choose_speed"), font=("Microsoft YaHei UI", 12)).pack()
+        speeds = ttk.Frame(steady)
         speeds.pack(pady=(12, 18))
         captions = {5: "speed_low", 30: "speed_mid", 100: "speed_high"}
         self.speed_buttons = []
@@ -151,7 +161,7 @@ class DemoView(ttk.Frame):
             button.pack(side=tk.LEFT, padx=14)
             self.speed_buttons.append(button)
 
-        buttons = ttk.Frame(control)
+        buttons = ttk.Frame(steady)
         buttons.pack(fill=tk.X, pady=(4, 14))
         self.forward_button = ttk.Button(
             buttons, text=tr(language, "forward"), style="DemoAction.TButton", command=lambda: self._request_run(1)
@@ -169,16 +179,56 @@ class DemoView(ttk.Frame):
             buttons.columnconfigure(column, weight=1)
 
         self.continuous_check = ttk.Checkbutton(
-            control, text=tr(language, "continuous"), variable=self.continuous_var
+            steady, text=tr(language, "continuous"), variable=self.continuous_var
         )
         self.continuous_check.pack()
         ttk.Label(
-            control,
+            steady,
             text=tr(language, "duration_note", seconds=DEMO_DEFAULT_DURATION_MS // 1000)
             + " "
             + tr(language, "change_note"),
             foreground=WARNING_TEXT,
         ).pack(pady=(12, 0))
+
+        effects = (
+            ("spring", "spring_return"),
+            ("damper", "viscous_damper"),
+            ("detent", "detent_knob"),
+            ("flywheel", "virtual_flywheel"),
+        )
+        self.effect_buttons = []
+        for index, (value, key) in enumerate(effects):
+            button = ttk.Radiobutton(
+                interactive,
+                text=tr(language, key),
+                variable=self.effect_var,
+                value=value,
+            )
+            button.grid(row=index // 2, column=index % 2, padx=12, pady=8, sticky="w")
+            self.effect_buttons.append(button)
+        for column in range(2):
+            interactive.columnconfigure(column, weight=1)
+        self.effect_start_button = ttk.Button(
+            interactive,
+            text=tr(language, "start_selected_effect"),
+            style="DemoAction.TButton",
+            command=lambda: self._on_interactive_run(self.effect_var.get()),
+        )
+        self.effect_start_button.grid(row=2, column=0, padx=8, pady=(14, 8), sticky="ew")
+        self.effect_stop_button = ttk.Button(
+            interactive,
+            text=tr(language, "stop"),
+            style="DemoStop.TButton",
+            command=self._on_stop,
+        )
+        self.effect_stop_button.grid(row=2, column=1, padx=8, pady=(14, 8), sticky="ew")
+        ttk.Label(
+            interactive,
+            text=tr(language, "interactive_note"),
+            foreground=WARNING_TEXT,
+            wraplength=720,
+            justify=tk.CENTER,
+        ).grid(row=3, column=0, columnspan=2, pady=(8, 0))
         ttk.Label(self, text=tr(language, "safety_note"), foreground=WARNING_TEXT).pack(
             pady=(18, 0)
         )
@@ -221,6 +271,12 @@ class DemoView(ttk.Frame):
         for button in self.speed_buttons:
             button.configure(state=run_state)
         self.continuous_check.configure(state=run_state)
+        for button in self.effect_buttons:
+            button.configure(state=run_state)
+        self.effect_start_button.configure(state=run_state)
+        self.effect_stop_button.configure(
+            state=tk.NORMAL if stop_enabled else tk.DISABLED
+        )
 
     def reset_continuous(self) -> None:
         self.continuous_var.set(False)

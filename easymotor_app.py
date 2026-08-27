@@ -66,6 +66,10 @@ from easymotor.protocols.waveform import (
 )
 from easymotor.services.demo_service import DemoAction, DemoError, DemoPhase, DemoService
 from easymotor.services.can_command_refresher import CanCommandRefresher
+from easymotor.services.interactive_demo import (
+    InteractiveDemoController,
+    InteractiveDemoMode,
+)
 from easymotor.theme import (
     LOG_BACKGROUND,
     LOG_ERROR,
@@ -429,6 +433,8 @@ class EasyMotorApp(tk.Tk):
         self.start_enable_attempts = 0
         self.start_enable_retry_at = 0.0
         self.pending_mit_single_command: MitCommand | None = None
+        self.pending_interactive_demo: InteractiveDemoMode | None = None
+        self.interactive_demo: InteractiveDemoController | None = None
         self.motion_command_active = False
         self.pulse_active = False
         self.continuous_active = False
@@ -557,6 +563,7 @@ class EasyMotorApp(tk.Tk):
             on_interface_changed=self.on_interface_changed,
             on_language_changed=self.on_language_changed,
             on_run=self.start_demo_run,
+            on_interactive_run=self.start_interactive_demo,
             on_stop=self.stop_motor,
             on_engineer_mode=self.show_engineer_mode,
         )
@@ -1097,6 +1104,78 @@ class EasyMotorApp(tk.Tk):
             self._execute_demo_action(action)
         self._render_demo_view()
 
+    def start_interactive_demo(self, mode_name: str) -> None:
+        """Start one of the host-side 100 Hz MIT interaction models."""
+        try:
+            mode = InteractiveDemoMode(mode_name)
+        except ValueError:
+            messagebox.showwarning(
+                tr(self.language_var.get(), "cannot_start"),
+                tr(self.language_var.get(), "unknown_effect"),
+                parent=self,
+            )
+            return
+        other_active = bool(
+            self.start_waiting
+            or self.pulse_active
+            or self.continuous_active
+            or self.stop_pending
+            or self.pending_mit_single_command is not None
+            or self.can_parameter_panel.busy
+        )
+        if (
+            not self.connected
+            or self.can_transport is None
+            or self.can_uid is None
+            or self.mci_state not in (0, 6)
+            or other_active
+        ):
+            messagebox.showwarning(
+                tr(self.language_var.get(), "cannot_start"),
+                tr(self.language_var.get(), "demo_busy" if other_active else "demo_unsafe"),
+                parent=self,
+            )
+            return
+        try:
+            self.can_transport.select_mit_mode()
+            self.demo_speed_mode_selected = False
+        except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
+            self._append_log("error", f"MIT demo mode select failed: {exc}\n", "can")
+            return
+        if self.mci_state == 0:
+            self.pending_interactive_demo = mode
+            if not self.start_motor():
+                self.pending_interactive_demo = None
+                self.stop_motor()
+        else:
+            try:
+                self._begin_interactive_demo(mode)
+            except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
+                self._append_log("error", f"Interactive MIT demo failed: {exc}\n", "can")
+                self.stop_motor()
+        self._render_demo_view()
+
+    def _begin_interactive_demo(self, mode: InteractiveDemoMode) -> None:
+        feedback = self._last_can_feedback
+        transport = self.can_transport
+        if transport is None or feedback is None or self.mci_state != 6:
+            raise RuntimeError("motor feedback is not ready for the interactive demo")
+        controller = InteractiveDemoController.create(mode, feedback)
+        command = controller.command(feedback, time.monotonic())
+        transport.command_mit(command)
+        self.interactive_demo = controller
+        self.motion_command_active = True
+        self.continuous_active = True
+        self.command_refresh_count = 0
+        self.mit_command_refresher.start_mit(transport, command)
+        self.command_refresh_var.set(f"MIT interactive demo: {mode.value} at 100 Hz")
+        self._append_log(
+            "event",
+            f"Interactive MIT demo started: {mode.value}; press STOP to exit.\n",
+            "can",
+        )
+        self._operation_log("event", f"Interactive demo started: {mode.value}.\n")
+
     def _restore_mit_mode_after_demo(self) -> None:
         if not self.demo_speed_mode_selected or self.can_transport is None:
             return
@@ -1139,6 +1218,12 @@ class EasyMotorApp(tk.Tk):
             text = tr(language, "stopping")
         elif self.start_waiting or self.demo_service.phase == DemoPhase.PREPARING:
             text = tr(language, "preparing")
+        elif self.interactive_demo is not None:
+            text = tr(
+                language,
+                "interactive_running",
+                effect=tr(language, self.interactive_demo.mode.value),
+            )
         elif self.demo_service.phase == DemoPhase.RUNNING and self.demo_service.plan:
             plan = self.demo_service.plan
             direction = tr(language, "forward_word" if plan.direction > 0 else "reverse_word")
@@ -1634,6 +1719,8 @@ class EasyMotorApp(tk.Tk):
         self.active_interface = None
         self.start_waiting = False
         self.pending_mit_single_command = None
+        self.pending_interactive_demo = None
+        self.interactive_demo = None
         self.motion_command_active = False
         self.pulse_active = False
         self.continuous_active = False
@@ -2005,6 +2092,20 @@ class EasyMotorApp(tk.Tk):
                         )
             else:
                 self.mci_state = None
+            if (
+                self.interactive_demo is not None
+                and self.mci_state == 6
+                and feedback.faults == 0
+            ):
+                try:
+                    command = self.interactive_demo.command(feedback, now)
+                    self.mit_command_refresher.update_mit(command)
+                except (ValueError, RuntimeError) as exc:
+                    self._append_log(
+                        "error", f"Interactive MIT update failed: {exc}\n", "can"
+                    )
+                    self.stop_motor()
+                    return
             self.state_var.set(
                 f"CAN mode={feedback.mode} faults=0x{feedback.faults:02X} "
                 f"pos={feedback.position_rad:.4f} rad vel={feedback.velocity_rad_s:.4f} rad/s"
@@ -2049,6 +2150,8 @@ class EasyMotorApp(tk.Tk):
                 self.pulse_active = False
                 self.continuous_active = False
                 self.motion_command_active = False
+                self.interactive_demo = None
+                self.pending_interactive_demo = None
                 self._restore_mit_mode_after_demo()
                 self.demo_service.cancel()
                 self.command_refresh_var.set("CAN command refresh: idle")
@@ -3010,7 +3113,17 @@ class EasyMotorApp(tk.Tk):
             self._operation_log("event", "Entered RUN.\n")
             pending_mit_command = self.pending_mit_single_command
             self.pending_mit_single_command = None
-            if pending_mit_command is not None:
+            pending_interactive_demo = self.pending_interactive_demo
+            self.pending_interactive_demo = None
+            if pending_interactive_demo is not None:
+                try:
+                    self._begin_interactive_demo(pending_interactive_demo)
+                except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
+                    self._append_log("error", f"Interactive MIT demo failed: {exc}\n", "can")
+                    self._operation_log("error", "Interactive demo failed; stopping.\n")
+                    self.stop_motor()
+                    return
+            elif pending_mit_command is not None:
                 try:
                     self._send_mit_single_frame(pending_mit_command)
                 except (ValueError, serial.SerialException, OSError, RuntimeError) as exc:
@@ -3326,6 +3439,8 @@ class EasyMotorApp(tk.Tk):
         self.start_waiting = False
         self.start_enable_attempts = 0
         self.pending_mit_single_command = None
+        self.pending_interactive_demo = None
+        self.interactive_demo = None
         self.command_refresh_var.set("CAN command refresh: idle")
         if hasattr(self, "mit_bench_panel"):
             self.mit_bench_panel.on_stop_or_disconnect()
@@ -3356,6 +3471,7 @@ class EasyMotorApp(tk.Tk):
             self._restore_mit_mode_after_demo()
             self._append_log("event", "已确认 MCI 进入 IDLE。\n")
             self._operation_log("event", "Stop confirmed; IDLE.\n")
+            self._update_control_state()
             return
         if self.stop_attempts < STOP_MAX_ATTEMPTS:
             self._append_log(
@@ -3369,6 +3485,7 @@ class EasyMotorApp(tk.Tk):
             "error", "CAN Stop 未获得确认；停止命令刷新，等待 MCU 看门狗停机。\n"
         )
         self._operation_log("error", "Stop not confirmed.\n")
+        self._update_control_state()
 
     def _update_control_state(self) -> None:
         self._render_demo_view()
