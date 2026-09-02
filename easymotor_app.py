@@ -3266,9 +3266,11 @@ class EasyMotorApp(tk.Tk):
         if self.mci_state != 0 or self._motor_activity_active():
             raise RuntimeError("motor must be IDLE before setting the joint zero")
         transport.set_zero()
+        transport.send(build_parameter_read(0x7029))
         self._append_log(
             "event",
-            "RS04 Type 6 sent; waiting for zero-position Type 2 feedback.\n",
+            "RS04 Type 6 sent; waiting for zero-position Type 2 feedback "
+            "and 0x7029 zero_sta readback.\n",
             "can",
         )
         self._operation_log("event", "Zero requested.\n")
@@ -3677,6 +3679,9 @@ class EasyMotorApp(tk.Tk):
             self.rotor_alignment_valid = bool(value)
             self.mit_bench_panel.set_alignment_valid(bool(value))
             return
+        elif index == 0x7029:
+            self.mit_bench_panel.set_zero_valid(bool(value))
+            return
         elif index == 0x701A:
             self.mit_bench_panel.set_measured_iq(float(value))
             return
@@ -3725,7 +3730,7 @@ class EasyMotorApp(tk.Tk):
                 and not self.start_waiting
                 and not self.stop_pending
             ):
-                indices = (0x3005, 0x3006, 0x7032, 0x7033, 0x701A)
+                indices = (0x3005, 0x3006, 0x7032, 0x7033, 0x7029, 0x701A)
                 index = indices[self._temperature_poll_index % len(indices)]
                 self._temperature_poll_index += 1
                 transport.send(build_parameter_read(index))

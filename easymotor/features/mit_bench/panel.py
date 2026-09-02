@@ -240,9 +240,14 @@ class MitBenchPanel(ttk.LabelFrame):
     def _on_zero(self) -> None:
         if not self._require_connection():
             return
-        if self._show_action_error(self._set_zero):
-            self.zero_valid = False
-            self._zero_requested = True
+        # Arm the acknowledgement gate before sending Type 6.  Some adapters
+        # return the firmware's immediate Type 2 response quickly enough for
+        # it to be dispatched while the send callback is still unwinding.
+        self.zero_valid = False
+        self._zero_requested = True
+        self._render_status()
+        if not self._show_action_error(self._set_zero):
+            self._zero_requested = False
             self._render_status()
 
     def _on_read_alignment(self) -> None:
@@ -273,6 +278,12 @@ class MitBenchPanel(ttk.LabelFrame):
     def set_calibrated(self, value: bool) -> None:
         self.calibrated = value
         self.torque_var.set("0.0")
+        self._render_status()
+
+    def set_zero_valid(self, value: bool) -> None:
+        self.zero_valid = bool(value)
+        if self.zero_valid:
+            self._zero_requested = False
         self._render_status()
 
     def set_measured_iq(self, value: float) -> None:

@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.python/
+.uv-cache/
 build/
 dist/
 release/

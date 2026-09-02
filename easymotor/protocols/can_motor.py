@@ -179,7 +179,7 @@ def build_stop(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
 
 
 def build_set_zero(node_id: int = 0x7F, host_id: int = 0xFD) -> CanFrame:
-    """Set the current stationary output position as the volatile joint zero."""
+    """Set and persist the current stationary output position as joint zero."""
     return CanFrame(make_id(6, host_id, node_id), bytes((1,)) + bytes(7))
 
 
