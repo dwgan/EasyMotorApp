@@ -174,7 +174,8 @@ ENGINEER_TEXT_EN = {
     "开始波形": "Start waveform",
     "停止波形": "Stop waveform",
     "分频(1..100)": "Decimation (1..100)",
-    "Y量程": "Y range",
+    "Y量程(A)": "Y range (A)",
+    "采样电阻": "Shunt resistor",
     "自动保存CSV": "Auto-save CSV",
     "包络模式(减带宽)": "Envelope mode",
     "保存波形": "Save waveform",
@@ -286,6 +287,12 @@ WAVE_GLITCH_LSB = 60
 WAVE_TIME_WINDOWS = ("30 ms", "200 ms", "1 s", "2 s", "5 s")
 WAVE_REDRAW_INTERVAL_MS = 100
 WAVE_DISPLAY_ENVELOPE_HZ = 1_000
+WAVE_CURRENT_AVERAGE_WINDOW_S = 0.1
+WAVE_SHUNT_CHOICES = ("1 mΩ", "2 mΩ", "4 mΩ")
+WAVE_CURRENT_SCALE_CHOICES = ("±2", "±5", "±10", "±20", "±40", "±80")
+CURRENT_ADC_REFERENCE_V = 3.287
+CURRENT_ADC_FULL_SCALE = 4095.0
+CURRENT_SENSE_GAIN = 20.0
 RX_QUEUE_INTERVAL_MS = 20
 RX_QUEUE_BUSY_INTERVAL_MS = 1
 RX_QUEUE_BUDGET_MS = 6.0
@@ -315,6 +322,31 @@ def parse_wave_time_window(text: str) -> float:
     if seconds <= 0.0:
         raise ValueError("waveform time window must be positive")
     return seconds
+
+
+def parse_shunt_milliohm(text: str) -> float:
+    """Parse one of the supported phase-current shunt selections."""
+    normalized = text.strip().lower().replace("ω", "ohm")
+    for suffix in ("mohm", "mω"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)].strip()
+            break
+    try:
+        value = float(normalized)
+    except ValueError as exc:
+        raise ValueError("unsupported shunt resistor") from exc
+    if value not in (1.0, 2.0, 4.0):
+        raise ValueError("shunt resistor must be 1, 2 or 4 mOhm")
+    return value
+
+
+def current_amp_per_lsb(shunt_milliohm: float) -> float:
+    """Return bipolar phase-current amperes represented by one ADC code."""
+    if shunt_milliohm <= 0.0:
+        raise ValueError("shunt resistor must be positive")
+    return CURRENT_ADC_REFERENCE_V / (
+        CURRENT_ADC_FULL_SCALE * CURRENT_SENSE_GAIN * shunt_milliohm * 1e-3
+    )
 
 
 def compress_wave_points(
@@ -497,9 +529,11 @@ class EasyMotorApp(tk.Tk):
         self.wave_single_var = tk.BooleanVar(value=False)
         self.wave_single_channel_var = tk.StringVar(value="U")
         self.wave_time_window_var = tk.StringVar(value="1 s")
+        self.wave_shunt_var = tk.StringVar(value=WAVE_SHUNT_CHOICES[0])
         self._wave_sample_rate_hz = 5_000.0
         self.wave_scale_var = localized_var("自动")
         self.wave_status_var = localized_var("波形: 停止")
+        self.wave_current_average_var = tk.StringVar(value="平均|I|: 等待波形")
         self.waveform_store = WaveformStore(
             raw_capacity=WAVE_BUFFER_MAX,
             display_capacity=5 * WAVE_DISPLAY_ENVELOPE_HZ,
@@ -834,6 +868,22 @@ class EasyMotorApp(tk.Tk):
             waveform_frame,
             text="波形流期间日志与波形并行显示；可导出为文本文件。",
         ).grid(row=0, column=2, padx=(20, 0), sticky="w")
+        ttk.Label(waveform_frame, text="采样电阻").grid(
+            row=1, column=0, pady=(6, 0), sticky="w"
+        )
+        self.wave_shunt_combo = ttk.Combobox(
+            waveform_frame,
+            textvariable=self.wave_shunt_var,
+            values=WAVE_SHUNT_CHOICES,
+            width=8,
+            state="readonly",
+        )
+        self.wave_shunt_combo.grid(
+            row=1, column=1, padx=(0, 12), pady=(6, 0), sticky="w"
+        )
+        ttk.Label(
+            waveform_frame, textvariable=self.wave_current_average_var
+        ).grid(row=1, column=2, padx=(20, 0), pady=(6, 0), sticky="w")
         waveform_frame.columnconfigure(3, weight=1)
 
         self.mit_bench_panel = MitBenchPanel(
@@ -1319,7 +1369,7 @@ class EasyMotorApp(tk.Tk):
                     self.wave_popup.title(self._ui("电流波形 (独立显示)"))
                     self._translate_widget_tree(self.wave_popup)
                     self.wave_scale_combo.configure(
-                        values=(self._ui("自动"), "±50", "±100", "±200", "±500")
+                        values=(self._ui("自动"), *WAVE_CURRENT_SCALE_CHOICES)
                     )
                     if self.wave_toggle_button is not None:
                         self.wave_toggle_button.configure(
@@ -2702,13 +2752,13 @@ class EasyMotorApp(tk.Tk):
             justify="center",
         )
         self.wave_dec_spin.grid(row=0, column=2, padx=(0, 12))
-        ttk.Label(tools, text="Y量程").grid(
+        ttk.Label(tools, text="Y量程(A)").grid(
             row=0, column=3, padx=(4, 4)
         )
         self.wave_scale_combo = ttk.Combobox(
             tools,
             textvariable=self.wave_scale_var,
-            values=(self._ui("自动"), "±50", "±100", "±200", "±500"),
+            values=(self._ui("自动"), *WAVE_CURRENT_SCALE_CHOICES),
             width=7,
             state="readonly",
         )
@@ -2739,6 +2789,22 @@ class EasyMotorApp(tk.Tk):
         ttk.Checkbutton(
             tools, text="自动保存CSV", variable=self.wave_save_var
         ).grid(row=1, column=5, padx=(8, 4), pady=(4, 0))
+        ttk.Label(tools, text="采样电阻").grid(
+            row=1, column=7, padx=(8, 4), pady=(4, 0)
+        )
+        self.wave_popup_shunt_combo = ttk.Combobox(
+            tools,
+            textvariable=self.wave_shunt_var,
+            values=WAVE_SHUNT_CHOICES,
+            width=8,
+            state="readonly",
+        )
+        self.wave_popup_shunt_combo.grid(
+            row=1, column=8, padx=(0, 8), pady=(4, 0)
+        )
+        ttk.Label(tools, textvariable=self.wave_current_average_var).grid(
+            row=1, column=9, columnspan=3, padx=(8, 0), pady=(4, 0), sticky="w"
+        )
         ttk.Checkbutton(
             tools,
             text="包络模式(减带宽)",
@@ -2876,9 +2942,12 @@ class EasyMotorApp(tk.Tk):
                 "v": self.wave_v_var.get(),
                 "w": self.wave_w_var.get(),
             }
-            series: dict[str, list[tuple[int, int]]] = {}
-            envelope_series: dict[str, list[tuple[int, int, int]]] = {}
-            values: list[int] = []
+            amp_per_lsb = current_amp_per_lsb(
+                parse_shunt_milliohm(self.wave_shunt_var.get())
+            )
+            series: dict[str, list[tuple[int, float]]] = {}
+            envelope_series: dict[str, list[tuple[int, float, float]]] = {}
+            values: list[float] = []
             time_window_s = parse_wave_time_window(self.wave_time_window_var.get())
             display_count = max(2, int(self._wave_sample_rate_hz * time_window_s))
             use_display_envelope = (
@@ -2892,7 +2961,10 @@ class EasyMotorApp(tk.Tk):
                     entries = self._wave_display_entries[channel]
                     if show[channel] and entries:
                         start = max(0, len(entries) - envelope_count)
-                        visible_entries = list(islice(entries, start, None))
+                        visible_entries = [
+                            (seq, low * amp_per_lsb, high * amp_per_lsb)
+                            for seq, low, high in islice(entries, start, None)
+                        ]
                         envelope_series[channel] = visible_entries
                         for _, low, high in visible_entries:
                             values.extend((low, high))
@@ -2901,11 +2973,19 @@ class EasyMotorApp(tk.Tk):
                     buf = self._wave_buffers[channel]
                     if show[channel] and buf:
                         start = max(0, len(buf) - display_count)
-                        visible = list(islice(buf, start, None))
+                        visible = [
+                            (seq, value * amp_per_lsb)
+                            for seq, value in islice(buf, start, None)
+                        ]
                         series[channel] = visible
                         values.extend(value for _, value in visible)
             stats_start = max(0, len(self._wave_stats_entries) - display_count)
-            stats_entries = list(islice(self._wave_stats_entries, stats_start, None))
+            stats_entries = [
+                (seq, tuple(value * amp_per_lsb for value in stats_values))
+                for seq, stats_values in islice(
+                    self._wave_stats_entries, stats_start, None
+                )
+            ]
             for _, stats_values in stats_entries:
                 values.extend(stats_values)
             scale_text = self.wave_scale_var.get()
@@ -2915,12 +2995,50 @@ class EasyMotorApp(tk.Tk):
             elif values:
                 low = min(values)
                 high = max(values)
-                y_span = max(high - low, 80)
+                y_span = max(high - low, 0.5)
                 margin = y_span * 0.15
                 y_min = low - margin
                 y_max = high + margin
             else:
-                y_min, y_max = -100.0, 100.0
+                y_min, y_max = -2.0, 2.0
+            average_sample_count = max(
+                1,
+                min(
+                    10_000,
+                    round(
+                        self._wave_sample_rate_hz
+                        * WAVE_CURRENT_AVERAGE_WINDOW_S
+                    ),
+                ),
+            )
+            raw_phase_averages = self._waveform_store_for_use().mean_absolute_raw(
+                average_sample_count
+            )
+            phase_averages = tuple(
+                None if value is None else value * amp_per_lsb
+                for value in raw_phase_averages
+            )
+            available = [value for value in phase_averages if value is not None]
+            phase_text = [
+                "--" if value is None else f"{value:.2f} A"
+                for value in phase_averages
+            ]
+            if len(available) == 3:
+                three_phase_text = f"{sum(available) / 3.0:.2f} A"
+            else:
+                three_phase_text = "--"
+            if self.language_var.get() == "en":
+                self.wave_current_average_var.set(
+                    "Mean |I| (latest 100 ms): "
+                    f"U={phase_text[0]} V={phase_text[1]} W={phase_text[2]} "
+                    f"3-phase={three_phase_text}"
+                )
+            else:
+                self.wave_current_average_var.set(
+                    "平均|I|（最近100 ms）："
+                    f"U={phase_text[0]} V={phase_text[1]} W={phase_text[2]} "
+                    f"三相={three_phase_text}"
+                )
             for canvas in canvases:
                 try:
                     canvas.delete("wave")
@@ -2933,11 +3051,11 @@ class EasyMotorApp(tk.Tk):
                     0, zero_y, width, zero_y, fill=WAVE_GRID, tags="wave"
                 )
                 canvas.create_text(
-                    6, 8, anchor="nw", text=f"{y_max:.0f}",
+                    6, 8, anchor="nw", text=f"{y_max:.1f} A",
                     fill=WAVE_LABEL, tags="wave",
                 )
                 canvas.create_text(
-                    6, height - 26, anchor="sw", text=f"{y_min:.0f}",
+                    6, height - 26, anchor="sw", text=f"{y_min:.1f} A",
                     fill=WAVE_LABEL, tags="wave",
                 )
                 canvas.create_text(

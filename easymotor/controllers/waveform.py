@@ -42,6 +42,13 @@ class CompactSampleRing:
             index = (self._start + offset) % self.capacity
             yield self._sequences[index], self._values[index]
 
+    def tail_values(self, count: int) -> Iterator[int]:
+        """Iterate over at most the newest *count* values without copying."""
+        start_offset = max(0, self._size - max(0, count))
+        for offset in range(start_offset, self._size):
+            index = (self._start + offset) % self.capacity
+            yield self._values[index]
+
 
 class WaveformStore:
     CHANNELS = ("u", "v", "w")
@@ -86,6 +93,22 @@ class WaveformStore:
     @property
     def lost_count(self) -> int:
         return self.transport_lost_count + self.firmware_drop_count
+
+    def mean_absolute_raw(
+        self, sample_count: int
+    ) -> tuple[float | None, float | None, float | None]:
+        """Return each phase's recent mean absolute ADC-current magnitude."""
+        if sample_count <= 0:
+            raise ValueError("sample_count must be positive")
+        result: list[float | None] = []
+        for channel in self.CHANNELS:
+            total = 0
+            count = 0
+            for value in self.raw[channel].tail_values(sample_count):
+                total += abs(value)
+                count += 1
+            result.append((total / count) if count else None)
+        return result[0], result[1], result[2]
 
     def _record_sequence_gap(self, sequence: int) -> None:
         if self.last_sequence is None:

@@ -8,7 +8,9 @@ from easymotor_app import (
     WAVE_SINGLE_SOF,
     compress_envelope_entries,
     compress_wave_points,
+    current_amp_per_lsb,
     parse_debug_baud,
+    parse_shunt_milliohm,
     parse_wave_time_window,
 )
 from easymotor.controllers.waveform import WaveformStore
@@ -44,6 +46,17 @@ class WaveDisplayTests(unittest.TestCase):
     def test_time_window_parser_supports_ms_and_seconds(self):
         self.assertAlmostEqual(parse_wave_time_window("200 ms"), 0.2)
         self.assertAlmostEqual(parse_wave_time_window("2 s"), 2.0)
+
+    def test_selectable_shunts_change_current_scale(self):
+        self.assertEqual(parse_shunt_milliohm("1 mΩ"), 1.0)
+        self.assertEqual(parse_shunt_milliohm("2 mohm"), 2.0)
+        self.assertEqual(parse_shunt_milliohm("4 mΩ"), 4.0)
+        one_milliohm = current_amp_per_lsb(1.0)
+        self.assertAlmostEqual(one_milliohm, 0.0401343, places=6)
+        self.assertAlmostEqual(current_amp_per_lsb(2.0), one_milliohm / 2.0)
+        self.assertAlmostEqual(current_amp_per_lsb(4.0), one_milliohm / 4.0)
+        with self.assertRaises(ValueError):
+            parse_shunt_milliohm("3 mΩ")
 
     def test_pixel_compression_keeps_noise_extrema(self):
         points = [(index, 0) for index in range(100)]
@@ -198,6 +211,14 @@ class WaveformStoreLossTests(unittest.TestCase):
 
         self.assertEqual(list(store.raw["u"]), [(2, 2), (3, 3), (4, 4)])
         self.assertEqual(store.raw["u"]._values.itemsize, 2)
+
+    def test_recent_mean_absolute_current_is_per_phase(self):
+        store = WaveformStore(raw_capacity=10, display_capacity=2, glitch_threshold=60)
+        store.ingest_three_phase((0, -10, 20, -30))
+        store.ingest_three_phase((1, 30, -40, 50))
+        store.ingest_three_phase((2, 100, 100, 100))
+
+        self.assertEqual(store.mean_absolute_raw(2), (65.0, 70.0, 75.0))
 
     def test_three_phase_gap_counts_each_missing_frame_and_wraps(self):
         store = WaveformStore(raw_capacity=20, display_capacity=20, glitch_threshold=60)
