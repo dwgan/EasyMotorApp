@@ -74,6 +74,9 @@ Python 包或构建目录，客户软件中不包含 GitHub Token。
 
 ### 演示模式（默认）
 
+互动效果的英文使用说明见 [Interactive Effects](docs/INTERACTIVE_EFFECTS_EN.md)，
+包括 Spring Return、Viscous Damper、Detent Knob 和 Virtual Flywheel，适合向客户介绍演示手感与操作方式。
+
 - 默认英文界面，可在右上角切换 English/中文；
 - 固定使用官方 USB-CAN（串口 921600 baud，CAN 1 Mbps）；
 - 启动后只显示接口、设备连接、状态、5/30/100 motor rpm、正转、停止和反转；
